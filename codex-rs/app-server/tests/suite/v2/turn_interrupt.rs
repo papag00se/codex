@@ -131,7 +131,11 @@ async fn turn_interrupt_resolves_pending_command_approval_request() -> Result<()
         "Start-Sleep -Seconds 10".to_string(),
     ];
     #[cfg(not(target_os = "windows"))]
-    let shell_command = vec!["sleep".to_string(), "10".to_string()];
+    let shell_command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import time; time.sleep(10)".to_string(),
+    ];
 
     let tmp = TempDir::new()?;
     let codex_home = tmp.path().join("codex_home");
@@ -172,6 +176,7 @@ async fn turn_interrupt_resolves_pending_command_approval_request() -> Result<()
                 text_elements: Vec::new(),
             }],
             cwd: Some(working_directory),
+            approval_policy: Some(codex_app_server_protocol::AskForApproval::UnlessTrusted),
             ..Default::default()
         })
         .await?;
@@ -250,6 +255,7 @@ fn create_config_toml(
             r#"
 model = "mock-model"
 approval_policy = "{approval_policy}"
+approvals_reviewer = "user"
 sandbox_mode = "danger-full-access"
 
 model_provider = "mock_provider"
