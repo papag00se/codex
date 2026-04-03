@@ -72,6 +72,44 @@ async fn find_thread_path_by_name_str_skips_newest_entry_without_rollout() -> st
     Ok(())
 }
 
+#[tokio::test]
+async fn find_thread_path_by_name_str_ignores_historical_name_after_rename() -> std::io::Result<()>
+{
+    let temp = TempDir::new()?;
+    let path = session_index_path(temp.path());
+    let renamed_id = ThreadId::new();
+    let current_id = ThreadId::new();
+    let current_rollout_path = temp
+        .path()
+        .join("sessions/2024/01/01")
+        .join(format!("rollout-2024-01-01T00-00-00-{current_id}.jsonl"));
+    std::fs::create_dir_all(current_rollout_path.parent().expect("rollout parent"))?;
+    std::fs::write(&current_rollout_path, "")?;
+    let lines = vec![
+        SessionIndexEntry {
+            id: renamed_id,
+            thread_name: "same".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        },
+        SessionIndexEntry {
+            id: current_id,
+            thread_name: "same".to_string(),
+            updated_at: "2024-01-02T00:00:00Z".to_string(),
+        },
+        SessionIndexEntry {
+            id: renamed_id,
+            thread_name: "different".to_string(),
+            updated_at: "2024-01-03T00:00:00Z".to_string(),
+        },
+    ];
+    write_index(&path, &lines)?;
+
+    let found = find_thread_path_by_name_str(temp.path(), "same").await?;
+
+    assert_eq!(found, Some(current_rollout_path));
+    Ok(())
+}
+
 #[test]
 fn find_thread_name_by_id_prefers_latest_entry() -> std::io::Result<()> {
     let temp = TempDir::new()?;

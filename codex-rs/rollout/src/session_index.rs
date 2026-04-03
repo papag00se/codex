@@ -186,7 +186,9 @@ fn collect_thread_ids_from_end_by_name(path: &Path, name: &str) -> std::io::Resu
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
     scan_index_from_end_for_each(path, |entry| {
-        if entry.thread_name == name && seen.insert(entry.id) {
+        // The first row seen for an id is its latest name. Ignore older rows for that id so a
+        // historical name cannot be treated as the current one after the thread is renamed.
+        if seen.insert(entry.id) && entry.thread_name == name {
             ids.push(entry.id);
         }
         Ok(None)
