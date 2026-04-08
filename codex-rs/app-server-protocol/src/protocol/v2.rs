@@ -54,6 +54,7 @@ use codex_protocol::protocol::ExecCommandSource as CoreExecCommandSource;
 use codex_protocol::protocol::ExecCommandStatus as CoreExecCommandStatus;
 use codex_protocol::protocol::GranularApprovalConfig as CoreGranularApprovalConfig;
 use codex_protocol::protocol::GuardianRiskLevel as CoreGuardianRiskLevel;
+use codex_protocol::protocol::GuardianUserAuthorization as CoreGuardianUserAuthorization;
 use codex_protocol::protocol::HookEventName as CoreHookEventName;
 use codex_protocol::protocol::HookExecutionMode as CoreHookExecutionMode;
 use codex_protocol::protocol::HookHandlerType as CoreHookHandlerType;
@@ -4506,6 +4507,7 @@ pub enum GuardianRiskLevel {
     Low,
     Medium,
     High,
+    Critical,
 }
 
 impl From<CoreGuardianRiskLevel> for GuardianRiskLevel {
@@ -4514,6 +4516,29 @@ impl From<CoreGuardianRiskLevel> for GuardianRiskLevel {
             CoreGuardianRiskLevel::Low => Self::Low,
             CoreGuardianRiskLevel::Medium => Self::Medium,
             CoreGuardianRiskLevel::High => Self::High,
+            CoreGuardianRiskLevel::Critical => Self::Critical,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export_to = "v2/")]
+/// [UNSTABLE] Authorization level assigned by guardian approval review.
+pub enum GuardianUserAuthorization {
+    Unknown,
+    Low,
+    Medium,
+    High,
+}
+
+impl From<CoreGuardianUserAuthorization> for GuardianUserAuthorization {
+    fn from(value: CoreGuardianUserAuthorization) -> Self {
+        match value {
+            CoreGuardianUserAuthorization::Unknown => Self::Unknown,
+            CoreGuardianUserAuthorization::Low => Self::Low,
+            CoreGuardianUserAuthorization::Medium => Self::Medium,
+            CoreGuardianUserAuthorization::High => Self::High,
         }
     }
 }
@@ -4526,9 +4551,8 @@ impl From<CoreGuardianRiskLevel> for GuardianRiskLevel {
 #[ts(export_to = "v2/")]
 pub struct GuardianApprovalReview {
     pub status: GuardianApprovalReviewStatus,
-    #[ts(type = "number | null")]
-    pub risk_score: Option<u8>,
     pub risk_level: Option<GuardianRiskLevel>,
+    pub user_authorization: Option<GuardianUserAuthorization>,
     pub rationale: Option<String>,
 }
 
@@ -7799,8 +7823,8 @@ mod tests {
     fn automatic_approval_review_deserializes_aborted_status() {
         let review: GuardianApprovalReview = serde_json::from_value(json!({
             "status": "aborted",
-            "riskScore": null,
             "riskLevel": null,
+            "userAuthorization": null,
             "rationale": null
         }))
         .expect("aborted automatic review should deserialize");
@@ -7808,8 +7832,8 @@ mod tests {
             review,
             GuardianApprovalReview {
                 status: GuardianApprovalReviewStatus::Aborted,
-                risk_score: None,
                 risk_level: None,
+                user_authorization: None,
                 rationale: None,
             }
         );

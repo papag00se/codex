@@ -8075,16 +8075,18 @@
               }
             ]
           },
-          "riskScore": {
-            "format": "uint8",
-            "minimum": 0.0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
           "status": {
             "$ref": "#/definitions/v2/GuardianApprovalReviewStatus"
+          },
+          "userAuthorization": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/GuardianUserAuthorization"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -8282,6 +8284,17 @@
       "GuardianRiskLevel": {
         "description": "[UNSTABLE] Risk level assigned by guardian approval review.",
         "enum": [
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ],
+        "type": "string"
+      },
+      "GuardianUserAuthorization": {
+        "description": "[UNSTABLE] Authorization level assigned by guardian approval review.",
+        "enum": [
+          "unknown",
           "low",
           "medium",
           "high"
