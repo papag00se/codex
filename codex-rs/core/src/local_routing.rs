@@ -27,12 +27,17 @@ struct RoutingState {
     pool: Arc<OllamaClientPool>,
 }
 
-/// Initialize the global routing state from environment variables.
+/// Initialize the global routing state.
+/// Loads from `.codex-multi/config.toml` in the current directory, falling
+/// back to environment variables for anything not in the config file.
 /// Called once, lazily. Returns None if local routing is not configured.
 async fn get_routing_state() -> &'static Option<RoutingState> {
     ROUTING_STATE
         .get_or_init(|| async {
-            let config = RoutingConfig::from_env();
+            // Load project config from .codex-multi/config.toml if it exists
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let project_config = codex_routing::project_config::ProjectConfig::load(&cwd);
+            let config = RoutingConfig::from_project_config(&project_config);
             let pool = Arc::new(OllamaClientPool::new());
 
             // Check if the classifier endpoint is reachable via /api/version

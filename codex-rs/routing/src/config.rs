@@ -134,6 +134,79 @@ impl RoutingConfig {
             codex_cli_enabled: false,
         }
     }
+
+    /// Load routing config from a ProjectConfig (`.codex-multi/config.toml`).
+    /// Falls back to from_env() for any missing fields.
+    pub fn from_project_config(pc: &crate::project_config::ProjectConfig) -> Self {
+        let mut config = Self::from_env();
+
+        // Override from project config model roles
+        if let Some(role) = pc.get_model("classifier") {
+            if let Some(ep) = endpoint_from_role(role) {
+                config.classifier = ep;
+            }
+        }
+        if let Some(role) = pc.get_model("light_reasoner") {
+            if let Some(ep) = endpoint_from_role(role) {
+                config.reasoner = ep;
+            }
+        }
+        if let Some(role) = pc.get_model("light_reasoner_backup") {
+            if let Some(ep) = endpoint_from_role(role) {
+                config.reasoner_backup = ep;
+            }
+        }
+        if let Some(role) = pc.get_model("light_coder") {
+            if let Some(ep) = endpoint_from_role(role) {
+                config.light_coder = ep;
+            }
+        }
+        if let Some(role) = pc.get_model("compactor") {
+            if let Some(ep) = endpoint_from_role(role) {
+                config.compactor = ep;
+            }
+        }
+
+        // Update the legacy router config to match the reasoner
+        config.router = RouterModelConfig {
+            base_url: config.reasoner.base_url.clone(),
+            model: config.reasoner.model.clone(),
+            num_ctx: config.reasoner.num_ctx,
+            temperature: 0.0,
+            timeout_seconds: config.reasoner.timeout_seconds,
+        };
+
+        config
+    }
+}
+
+/// Extract an OllamaEndpoint from a model role (single entry only).
+fn endpoint_from_role(role: &crate::project_config::ModelRole) -> Option<OllamaEndpoint> {
+    match role {
+        crate::project_config::ModelRole::Single {
+            provider,
+            endpoint,
+            model,
+            reasoning,
+            num_ctx,
+        } => {
+            if provider != "ollama" {
+                return None; // Only Ollama endpoints can be used as local endpoints
+            }
+            Some(OllamaEndpoint {
+                base_url: endpoint.clone().unwrap_or_else(|| "http://127.0.0.1:11434".into()),
+                model: model.clone(),
+                num_ctx: num_ctx.unwrap_or(8192),
+                temperature: if reasoning == "off" { 0.0 } else { 0.1 },
+                timeout_seconds: 300,
+                enabled: true,
+            })
+        }
+        crate::project_config::ModelRole::Weighted { .. } => {
+            // Weighted roles are for cloud models, not local endpoints
+            None
+        }
+    }
 }
 
 impl Default for RoutingConfig {
