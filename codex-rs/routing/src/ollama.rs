@@ -62,6 +62,22 @@ impl OllamaClientPool {
         response_format: Option<&str>,
         timeout_seconds: u64,
     ) -> Option<JsonValue> {
+        self.chat_with_tools(base_url, model, messages, system, temperature, num_ctx, response_format, timeout_seconds, None).await
+    }
+
+    /// Call Ollama's /api/chat endpoint with optional tools and serialization.
+    pub async fn chat_with_tools(
+        &self,
+        base_url: &str,
+        model: &str,
+        messages: Vec<JsonValue>,
+        system: Option<&str>,
+        temperature: f64,
+        num_ctx: usize,
+        response_format: Option<&str>,
+        timeout_seconds: u64,
+        tools: Option<Vec<JsonValue>>,
+    ) -> Option<JsonValue> {
         let sem = self.semaphore_for(base_url).await;
         let _permit = sem.acquire().await.ok()?;
 
@@ -85,6 +101,10 @@ impl OllamaClientPool {
 
         if response_format == Some("json") {
             payload["format"] = serde_json::json!("json");
+        }
+
+        if let Some(tools) = tools {
+            payload["tools"] = serde_json::json!(tools);
         }
 
         // Disable thinking for router calls
