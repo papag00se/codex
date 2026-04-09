@@ -122,16 +122,37 @@ pub async fn classify_request(
         .and_then(|c| c.as_str())
         .unwrap_or("");
 
+    // Strip <think>...</think> tags that qwen3.5 models sometimes add
+    let content = strip_think_tags(content);
+    let content = content.trim();
+
     // Parse the JSON response
     let parsed: ClassifierResponse = match serde_json::from_str(content) {
         Ok(p) => p,
-        Err(e) => {
-            warn!(
-                error = %e,
-                content = %&content[..content.len().min(200)],
-                "Classifier returned invalid JSON, falling back to cloud_coder"
-            );
-            return fallback("invalid classifier response");
+        Err(_) => {
+            // Try to salvage: sometimes the model returns JSON but with extra fields
+            // or returns a tool call instead of a classification
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
+                if let Some(route) = v.get("route").and_then(|r| r.as_str()) {
+                    ClassifierResponse {
+                        route: route.to_string(),
+                        tools_potential: v.get("tools_potential").and_then(|t| t.as_bool()),
+                        reason: v.get("reason").and_then(|r| r.as_str()).map(String::from),
+                    }
+                } else {
+                    warn!(
+                        content = %&content[..content.len().min(200)],
+                        "Classifier returned JSON without 'route' field, falling back"
+                    );
+                    return fallback("no route in response");
+                }
+            } else {
+                warn!(
+                    content = %&content[..content.len().min(200)],
+                    "Classifier returned non-JSON, falling back"
+                );
+                return fallback("invalid classifier response");
+            }
         }
     };
 
@@ -161,6 +182,20 @@ pub async fn classify_request(
         "Request classified"
     );
 
+    result
+}
+
+/// Strip `<think>...</think>` blocks from model output.
+fn strip_think_tags(text: &str) -> String {
+    let mut result = text.to_string();
+    while let Some(start) = result.find("<think>") {
+        if let Some(end) = result.find("</think>") {
+            result = format!("{}{}", &result[..start], &result[end + 8..]);
+        } else {
+            result = result[..start].to_string();
+            break;
+        }
+    }
     result
 }
 

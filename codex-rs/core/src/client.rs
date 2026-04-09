@@ -1409,11 +1409,21 @@ impl ModelClientSession {
         service_tier: Option<ServiceTier>,
         turn_metadata_header: Option<&str>,
     ) -> Result<ResponseStream> {
-        // Per-request routing: try local Ollama for tool-free requests.
-        // Requests with tools go to cloud because local models can't execute them.
-        if let Some(local_stream) = crate::local_routing::try_route_local(prompt).await {
-            return Ok(local_stream);
+        // Per-request routing: classify and route to local or override cloud model.
+        use crate::local_routing::RouteResult;
+        let model_override: Option<ModelInfo>;
+        match crate::local_routing::route_request(prompt).await {
+            RouteResult::Local(stream) => return Ok(stream),
+            RouteResult::CloudOverride(slug) => {
+                let mut m = model_info.clone();
+                m.slug = slug;
+                model_override = Some(m);
+            }
+            RouteResult::Default => {
+                model_override = None;
+            }
         }
+        let model_info = model_override.as_ref().unwrap_or(model_info);
 
         let wire_api = self.client.state.provider.wire_api;
         match wire_api {

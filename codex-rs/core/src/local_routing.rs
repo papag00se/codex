@@ -24,6 +24,7 @@ static ROUTING_STATE: OnceCell<Option<RoutingState>> = OnceCell::const_new();
 
 struct RoutingState {
     config: RoutingConfig,
+    project_config: codex_routing::project_config::ProjectConfig,
     pool: Arc<OllamaClientPool>,
 }
 
@@ -60,7 +61,7 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
                     classifier_model = %config.classifier.model,
                     "Per-request routing enabled — classifier LLM reachable"
                 );
-                Some(RoutingState { config, pool })
+                Some(RoutingState { config, project_config, pool })
             } else {
                 info!("Per-request routing disabled — classifier LLM not reachable, all requests go to cloud");
                 None
@@ -69,22 +70,33 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
         .await
 }
 
-/// Try to route a request to a local Ollama model.
-///
-/// Returns `Some(ResponseStream)` if the request was handled locally (free).
-/// Returns `None` if the request should go to the cloud provider.
-///
-/// This is called from ModelClientSession::stream() on every model API call.
-pub(crate) async fn try_route_local(prompt: &Prompt) -> Option<ResponseStream> {
-    let state = get_routing_state().await.as_ref()?;
+/// Result of per-request routing.
+pub(crate) enum RouteResult {
+    /// Request handled locally — use this stream.
+    Local(ResponseStream),
+    /// Request should go to cloud, but with this model override.
+    /// The slug replaces model_info.slug for this request only.
+    CloudOverride(String),
+    /// No routing — use the default cloud model.
+    Default,
+}
 
-    // Extract the last user message for classification (not the full history)
+/// Route a request: local model, cloud with model override, or default.
+///
+/// Called from ModelClientSession::stream() on every model API call.
+pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
+    let state = match get_routing_state().await.as_ref() {
+        Some(s) => s,
+        None => return RouteResult::Default,
+    };
+
+    // Extract the last user message for classification
     let prompt_text = extract_last_message(prompt);
     if prompt_text.is_empty() {
-        return None;
+        return RouteResult::Default;
     }
 
-    // Extract tool names (just names, not full schemas — saves context)
+    // Extract tool names (just names, not full schemas)
     let tool_names: Vec<&str> = prompt
         .tools
         .iter()
@@ -95,7 +107,6 @@ pub(crate) async fn try_route_local(prompt: &Prompt) -> Option<ResponseStream> {
     let (tool_call_count, turn_count) = count_recent_activity(prompt);
 
     // Ask the classifier LLM where this request should go.
-    // This is the judgment call — the LLM decides, not regex.
     let classification = classify_request(
         &prompt_text,
         &tool_names,
@@ -106,70 +117,140 @@ pub(crate) async fn try_route_local(prompt: &Prompt) -> Option<ResponseStream> {
     )
     .await;
 
-    // Deterministic: pick the endpoint based on the classification
-    let endpoint = match classification.route {
-        RouteTarget::LightReasoner => {
-            if state.config.reasoner.enabled {
-                Some(&state.config.reasoner)
-            } else if state.config.reasoner_backup.enabled {
-                Some(&state.config.reasoner_backup)
-            } else {
-                None
+    match classification.route {
+        // --- Local routes: call Ollama directly ---
+        RouteTarget::LightReasoner | RouteTarget::LightCoder => {
+            let endpoint = match classification.route {
+                RouteTarget::LightReasoner => {
+                    if state.config.reasoner.enabled {
+                        Some(&state.config.reasoner)
+                    } else if state.config.reasoner_backup.enabled {
+                        Some(&state.config.reasoner_backup)
+                    } else {
+                        None
+                    }
+                }
+                RouteTarget::LightCoder => {
+                    if state.config.light_coder.enabled {
+                        Some(&state.config.light_coder)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            let Some(endpoint) = endpoint else {
+                return RouteResult::Default;
+            };
+
+            info!(
+                model = %endpoint.model,
+                route = ?classification.route,
+                tools_potential = classification.tools_potential,
+                reason = %classification.reason,
+                "Routing to local model (free)"
+            );
+
+            let messages = prompt_to_ollama_messages(prompt);
+            let system = extract_system_instructions(prompt);
+
+            match call_ollama_text(&state.pool, endpoint, messages, system.as_deref()).await {
+                Ok(response) => {
+                    info!(
+                        model = %response.model,
+                        input_tokens = response.input_tokens,
+                        output_tokens = response.output_tokens,
+                        "Local model response received"
+                    );
+                    RouteResult::Local(ollama_response_to_stream(response))
+                }
+                Err(e) => {
+                    warn!(error = %e, "Local model failed, falling back to cloud");
+                    RouteResult::Default
+                }
             }
         }
-        RouteTarget::LightCoder => {
-            if state.config.light_coder.enabled {
-                Some(&state.config.light_coder)
-            } else {
-                None
-            }
-        }
-        // All cloud routes: return None, let the normal cloud path handle it
+
+        // --- Cloud routes: pick model from config (with weighted distribution) ---
         RouteTarget::CloudFast
         | RouteTarget::CloudMini
         | RouteTarget::CloudReasoner
-        | RouteTarget::CloudCoder => None,
-    };
+        | RouteTarget::CloudCoder => {
+            let role_name = match classification.route {
+                RouteTarget::CloudFast => "cloud_fast",
+                RouteTarget::CloudMini => "cloud_mini",
+                RouteTarget::CloudReasoner => "cloud_reasoner",
+                RouteTarget::CloudCoder => "cloud_coder",
+                _ => unreachable!(),
+            };
 
-    let endpoint = endpoint?;
+            let model_slug = pick_cloud_model(&state.project_config, role_name);
 
-    info!(
-        model = %endpoint.model,
-        endpoint = %endpoint.base_url,
-        route = ?classification.route,
-        tools_potential = classification.tools_potential,
-        reason = %classification.reason,
-        "Routing to local model (free)"
-    );
-
-    // Build Ollama messages — strip tools if tools_potential is false
-    // to save context window on the local model
-    let messages = prompt_to_ollama_messages(prompt);
-    let system = extract_system_instructions(prompt);
-
-    let result = call_ollama_text(
-        &state.pool,
-        endpoint,
-        messages,
-        system.as_deref(),
-    )
-    .await;
-
-    match result {
-        Ok(response) => {
-            info!(
-                model = %response.model,
-                input_tokens = response.input_tokens,
-                output_tokens = response.output_tokens,
-                "Local model response received"
-            );
-            Some(ollama_response_to_stream(response))
-        }
-        Err(e) => {
-            warn!(error = %e, "Local model failed, falling back to cloud");
-            None
+            match model_slug {
+                Some(slug) => {
+                    info!(
+                        route = role_name,
+                        model = %slug,
+                        reason = %classification.reason,
+                        "Routing to cloud model (override)"
+                    );
+                    RouteResult::CloudOverride(slug)
+                }
+                None => {
+                    info!(
+                        route = role_name,
+                        reason = %classification.reason,
+                        "No config for cloud route, using default model"
+                    );
+                    RouteResult::Default
+                }
+            }
         }
     }
+}
+
+/// Pick a cloud model from the project config's weighted entries for a role.
+/// Returns None if no config exists for this role.
+fn pick_cloud_model(
+    pc: &codex_routing::project_config::ProjectConfig,
+    role_name: &str,
+) -> Option<String> {
+    use codex_routing::project_config::ModelRole;
+
+    let role = pc.get_model(role_name)?;
+    match role {
+        ModelRole::Single { model, .. } => Some(model.clone()),
+        ModelRole::Weighted { entries } => {
+            if entries.is_empty() {
+                return None;
+            }
+            // Weighted random selection
+            let total_weight: u32 = entries.iter().map(|e| e.weight).sum();
+            if total_weight == 0 {
+                return Some(entries[0].model.clone());
+            }
+            let mut pick = rand_u32() % total_weight;
+            for entry in entries {
+                if pick < entry.weight {
+                    return Some(entry.model.clone());
+                }
+                pick -= entry.weight;
+            }
+            // Shouldn't reach here, but fallback to first
+            Some(entries[0].model.clone())
+        }
+    }
+}
+
+/// Simple random u32 — no external crate dependency.
+fn rand_u32() -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::time::Instant::now().hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish() as u32
 }
 
 // --- Response translation ---
