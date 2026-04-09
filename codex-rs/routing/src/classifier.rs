@@ -73,6 +73,23 @@ pub async fn classify_request(
     config: &RoutingConfig,
     pool: &OllamaClientPool,
 ) -> ClassifyResult {
+    classify_request_with_context(
+        prompt_text, tool_names, recent_tool_call_count, recent_turn_count,
+        config, pool, "", "",
+    ).await
+}
+
+/// Classify a request with additional context from routing history and codebase.
+pub async fn classify_request_with_context(
+    prompt_text: &str,
+    tool_names: &[&str],
+    recent_tool_call_count: usize,
+    recent_turn_count: usize,
+    config: &RoutingConfig,
+    pool: &OllamaClientPool,
+    routing_profile: &str,
+    codebase_context: &str,
+) -> ClassifyResult {
     let classifier_ep = &config.classifier;
     if !classifier_ep.enabled {
         return fallback("classifier disabled");
@@ -80,8 +97,18 @@ pub async fn classify_request(
 
     // Build the classifier prompt — minimal context, fast
     let tools_str = tool_names.join(", ");
+    let mut extra_context = String::new();
+    if !codebase_context.is_empty() {
+        extra_context.push_str(codebase_context);
+        extra_context.push('\n');
+    }
+    if !routing_profile.is_empty() {
+        extra_context.push_str(routing_profile);
+        extra_context.push('\n');
+    }
     let user_content = format!(
         "{CLASSIFIER_PROMPT}{tools_str}\n\
+         {extra_context}\
          Recent context: {recent_tool_call_count} tool calls in last {recent_turn_count} turns\n\
          Request to classify: {prompt_text}",
     );

@@ -27,6 +27,8 @@ struct RoutingState {
     project_config: codex_routing::project_config::ProjectConfig,
     pool: Arc<OllamaClientPool>,
     usage: codex_routing::usage::UsageTracker,
+    feedback: std::sync::Mutex<codex_routing::feedback::FeedbackStore>,
+    codebase_context: codex_routing::codebase_context::CodebaseContext,
 }
 
 /// Initialize the global routing state.
@@ -65,7 +67,11 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
                 let usage = codex_routing::usage::UsageTracker::new(
                     project_config.usage.primary_warn_threshold,
                 );
-                Some(RoutingState { config, project_config, pool, usage })
+                let feedback = std::sync::Mutex::new(
+                    codex_routing::feedback::FeedbackStore::new(&cwd),
+                );
+                let codebase_context = codex_routing::codebase_context::CodebaseContext::detect(&cwd);
+                Some(RoutingState { config, project_config, pool, usage, feedback, codebase_context })
             } else {
                 info!("Per-request routing disabled — classifier LLM not reachable, all requests go to cloud");
                 None
@@ -151,14 +157,24 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
     // Count recent tool calls from conversation history
     let (tool_call_count, turn_count) = count_recent_activity(prompt);
 
-    // Ask the classifier LLM where this request should go.
-    let classification = classify_request(
+    // Get routing profiles and codebase context for smarter classification
+    let routing_profile = state.feedback
+        .lock()
+        .map(|f| f.profile_context())
+        .unwrap_or_default();
+    let codebase_ctx = state.codebase_context.classifier_context();
+
+    // Ask the classifier LLM where this request should go,
+    // with routing history and codebase context.
+    let classification = codex_routing::classifier::classify_request_with_context(
         &prompt_text,
         &tool_names,
         tool_call_count,
         turn_count,
         &state.config,
         &state.pool,
+        &routing_profile,
+        &codebase_ctx,
     )
     .await;
 
@@ -200,8 +216,12 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
             let messages = prompt_to_ollama_messages(prompt);
             let system = extract_system_instructions(prompt);
 
+            let started = std::time::Instant::now();
             match call_ollama_text(&state.pool, endpoint, messages, system.as_deref()).await {
                 Ok(response) => {
+                    let latency_ms = started.elapsed().as_millis() as u64;
+                    let route_name = format!("{:?}", classification.route);
+
                     // G7: Quality check before returning local response
                     if let Some(reason) = codex_routing::quality::check_response_quality(
                         &response.content,
@@ -212,7 +232,38 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
                             reason = %reason,
                             "Local response failed quality check, falling back to cloud"
                         );
+                        // G1: Record failure in feedback
+                        if let Ok(mut fb) = state.feedback.lock() {
+                            fb.record(codex_routing::feedback::RoutingOutcome {
+                                timestamp: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default().as_secs(),
+                                route: route_name,
+                                model: response.model.clone(),
+                                success: false,
+                                input_tokens: response.input_tokens,
+                                output_tokens: response.output_tokens,
+                                latency_ms,
+                                quality_ok: false,
+                            });
+                        }
                         return RouteResult::Default;
+                    }
+
+                    // G1: Record success in feedback
+                    if let Ok(mut fb) = state.feedback.lock() {
+                        fb.record(codex_routing::feedback::RoutingOutcome {
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default().as_secs(),
+                            route: route_name,
+                            model: response.model.clone(),
+                            success: true,
+                            input_tokens: response.input_tokens,
+                            output_tokens: response.output_tokens,
+                            latency_ms,
+                            quality_ok: true,
+                        });
                     }
 
                     state.usage.record(&response.model, response.input_tokens, response.output_tokens);
