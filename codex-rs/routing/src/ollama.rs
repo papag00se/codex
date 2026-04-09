@@ -21,6 +21,9 @@ use tracing::warn;
 pub struct OllamaClientPool {
     semaphores: Mutex<HashMap<String, Arc<Semaphore>>>,
     client: Client,
+    /// Tracks the last model used on each endpoint URL.
+    /// Warm models avoid 10-20s cold-load penalty.
+    warm_models: Mutex<HashMap<String, String>>,
 }
 
 impl OllamaClientPool {
@@ -31,8 +34,22 @@ impl OllamaClientPool {
             .unwrap_or_default();
         Self {
             semaphores: Mutex::new(HashMap::new()),
+            warm_models: Mutex::new(HashMap::new()),
             client,
         }
+    }
+
+    /// Get the last model used on an endpoint (the "warm" model).
+    /// Returns None if no model has been used on this endpoint yet.
+    pub async fn warm_model(&self, base_url: &str) -> Option<String> {
+        let map = self.warm_models.lock().await;
+        map.get(base_url).cloned()
+    }
+
+    /// Record which model was just used on an endpoint.
+    async fn record_warm_model(&self, base_url: &str, model: &str) {
+        let mut map = self.warm_models.lock().await;
+        map.insert(base_url.to_string(), model.to_string());
     }
 
     /// Access the underlying HTTP client (for health checks, etc.).
@@ -121,7 +138,10 @@ impl OllamaClientPool {
 
         match result {
             Ok(resp) => match resp.json::<JsonValue>().await {
-                Ok(body) => Some(body),
+                Ok(body) => {
+                    self.record_warm_model(base_url, model).await;
+                    Some(body)
+                }
                 Err(e) => {
                     warn!("Ollama response parse error for {url}: {e}");
                     None

@@ -11,12 +11,15 @@
 //! - Routing configuration
 
 pub mod classifier;
+pub mod codebase_context;
 pub mod config;
 pub mod engine;
+pub mod feedback;
 pub mod local_dispatch;
 pub mod metrics;
 pub mod ollama;
 pub mod project_config;
+pub mod quality;
 pub mod tool_format;
 pub mod tool_recovery;
 pub mod usage;

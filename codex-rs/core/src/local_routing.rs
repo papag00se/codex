@@ -202,6 +202,19 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
 
             match call_ollama_text(&state.pool, endpoint, messages, system.as_deref()).await {
                 Ok(response) => {
+                    // G7: Quality check before returning local response
+                    if let Some(reason) = codex_routing::quality::check_response_quality(
+                        &response.content,
+                        &prompt_text,
+                    ) {
+                        warn!(
+                            model = %response.model,
+                            reason = %reason,
+                            "Local response failed quality check, falling back to cloud"
+                        );
+                        return RouteResult::Default;
+                    }
+
                     state.usage.record(&response.model, response.input_tokens, response.output_tokens);
                     info!(
                         model = %response.model,
