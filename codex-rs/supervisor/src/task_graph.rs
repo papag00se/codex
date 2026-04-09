@@ -44,6 +44,11 @@ pub struct Task {
     pub max_retries: u32,
     pub result: Option<String>,
     pub error: Option<String>,
+    /// Thread ID of the last agent that worked on this task.
+    /// Used for context resumption: retries fork from this agent's conversation
+    /// so the new agent sees what was tried and why it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_agent_thread_id: Option<String>,
 }
 
 /// The task graph — holds all tasks and provides deterministic queries.
@@ -184,6 +189,7 @@ mod tests {
             max_retries: 3,
             result: None,
             error: None,
+            last_agent_thread_id: None,
         }
     }
 

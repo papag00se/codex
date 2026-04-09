@@ -25,6 +25,7 @@ use codex_routing::config::RoutingConfig;
 use codex_routing::engine::route_task;
 use codex_routing::OllamaClientPool;
 use codex_supervisor::run_supervisor;
+use codex_supervisor::DispatchResult;
 use codex_supervisor::SupervisorConfig;
 use codex_supervisor::SupervisorJudge;
 use codex_supervisor::Task as SupervisorTask;
@@ -218,6 +219,16 @@ impl CodexJudge {
         prompt: &str,
         output_schema: Option<JsonValue>,
     ) -> Result<String, String> {
+        let (text, _thread_id) = self.spawn_and_wait_full(prompt, output_schema).await?;
+        Ok(text)
+    }
+
+    /// Spawn a sub-agent and wait for completion. Returns both the output and thread ID.
+    async fn spawn_and_wait_full(
+        &self,
+        prompt: &str,
+        output_schema: Option<JsonValue>,
+    ) -> Result<(String, String), String> {
         let agent_control = &self.session.services.agent_control;
         let config = (*self.turn.config).clone();
 
@@ -248,9 +259,10 @@ impl CodexJudge {
             status = status_rx.borrow().clone();
         }
 
+        let tid_string = thread_id.to_string();
         match status {
             AgentStatus::Completed(msg) => {
-                Ok(msg.unwrap_or_else(|| "Agent completed (no message)".into()))
+                Ok((msg.unwrap_or_else(|| "Agent completed (no message)".into()), tid_string))
             }
             AgentStatus::Errored(err) => Err(format!("Agent errored: {err}")),
             AgentStatus::Shutdown => Err("Agent was shut down".into()),
@@ -399,6 +411,7 @@ impl CodexJudge {
                 max_retries: 3,
                 result: None,
                 error: None,
+                last_agent_thread_id: None,
             })
             .collect()
     }
@@ -415,6 +428,7 @@ impl CodexJudge {
             max_retries: 3,
             result: None,
             error: None,
+            last_agent_thread_id: None,
         }
     }
 }
@@ -445,10 +459,22 @@ impl SupervisorJudge for CodexJudge {
         }
     }
 
-    async fn dispatch_task(&self, task: &SupervisorTask) -> Result<String, String> {
-        info!(task_id = %task.id, description = %task.description, "Dispatching task");
-        // Use routing to decide: local Ollama (free) or cloud Codex (tokens)
-        self.route_and_dispatch(task).await
+    async fn dispatch_task(&self, task: &SupervisorTask) -> Result<DispatchResult, String> {
+        info!(
+            task_id = %task.id,
+            description = %task.description,
+            retry = task.retry_count,
+            has_previous_context = task.last_agent_thread_id.is_some(),
+            "Dispatching task"
+        );
+
+        // Use spawn_and_wait_full to get both output and thread ID
+        let (output, thread_id) = self.spawn_and_wait_full(&task.description, None).await?;
+
+        Ok(DispatchResult {
+            output,
+            agent_thread_id: Some(thread_id),
+        })
     }
 
     async fn evaluate_completion(&self, task: &SupervisorTask, output: &str) -> bool {

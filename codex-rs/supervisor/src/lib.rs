@@ -8,5 +8,5 @@
 pub mod supervisor_loop;
 pub mod task_graph;
 
-pub use supervisor_loop::{run_supervisor, SupervisorConfig, SupervisorJudge, SupervisorResult, TerminationReason};
+pub use supervisor_loop::{run_supervisor, DispatchResult, SupervisorConfig, SupervisorJudge, SupervisorResult, TerminationReason};
 pub use task_graph::{Task, TaskGraph, TaskStatus};

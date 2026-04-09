@@ -54,14 +54,25 @@ pub enum TerminationReason {
 ///
 /// Implement this trait to connect the supervisor to actual LLM providers
 /// (or mock it for testing).
+/// Result of dispatching a task — includes the output and the agent's thread ID
+/// so retries can fork from the previous agent's conversation.
+#[derive(Debug, Clone)]
+pub struct DispatchResult {
+    /// The agent's final output text.
+    pub output: String,
+    /// The agent's thread ID — stored on the task so retries can resume context.
+    pub agent_thread_id: Option<String>,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait SupervisorJudge {
     /// Decompose a goal into a list of tasks. (LLM judgment: planning)
     async fn plan_tasks(&self, goal: &str) -> Vec<Task>;
 
     /// Dispatch a task to a sub-agent and wait for it to finish.
-    /// Returns the agent's output text (or error).
-    async fn dispatch_task(&self, task: &Task) -> Result<String, String>;
+    /// Returns the agent's output and thread ID.
+    /// The task's `last_agent_thread_id` is available for forking context.
+    async fn dispatch_task(&self, task: &Task) -> Result<DispatchResult, String>;
 
     /// Evaluate whether a task's output means the task is complete.
     /// (LLM judgment: completion evaluation)
@@ -99,6 +110,7 @@ pub async fn run_supervisor<J: SupervisorJudge>(
             max_retries: config.max_retries_per_task,
             result: None,
             error: None,
+            last_agent_thread_id: None,
         };
         return run_loop(TaskGraph::new(vec![single]), config, judge).await;
     }
@@ -160,7 +172,14 @@ async fn run_loop<J: SupervisorJudge>(
             let dispatch_result = judge.dispatch_task(&task).await;
 
             match dispatch_result {
-                Ok(output) => {
+                Ok(dr) => {
+                    // Store the agent's thread ID so retries can fork from it
+                    if let Some(ref tid) = dr.agent_thread_id {
+                        if let Some(t) = graph.get_mut(&task_id) {
+                            t.last_agent_thread_id = Some(tid.clone());
+                        }
+                    }
+                    let output = dr.output;
                     graph.mark_evaluating(&task_id, Some(output.clone()));
 
                     // LLM JUDGMENT: is the task complete?
@@ -252,6 +271,7 @@ mod tests {
                     max_retries: 3,
                     result: None,
                     error: None,
+            last_agent_thread_id: None,
                 },
                 Task {
                     id: "t2".into(),
@@ -264,12 +284,13 @@ mod tests {
                     max_retries: 3,
                     result: None,
                     error: None,
+            last_agent_thread_id: None,
                 },
             ]
         }
 
-        async fn dispatch_task(&self, _task: &Task) -> Result<String, String> {
-            Ok("done".into())
+        async fn dispatch_task(&self, _task: &Task) -> Result<DispatchResult, String> {
+            Ok(DispatchResult { output: "done".into(), agent_thread_id: None })
         }
 
         async fn evaluate_completion(&self, _task: &Task, _output: &str) -> bool {
@@ -297,14 +318,15 @@ mod tests {
                 max_retries: 3,
                 result: None,
                 error: None,
+            last_agent_thread_id: None,
             }]
         }
 
-        async fn dispatch_task(&self, task: &Task) -> Result<String, String> {
+        async fn dispatch_task(&self, task: &Task) -> Result<DispatchResult, String> {
             if task.retry_count == 0 {
                 Err("first attempt fails".into())
             } else {
-                Ok("done on retry".into())
+                Ok(DispatchResult { output: "done on retry".into(), agent_thread_id: None })
             }
         }
 
@@ -333,10 +355,11 @@ mod tests {
                 max_retries: 2,
                 result: None,
                 error: None,
+            last_agent_thread_id: None,
             }]
         }
 
-        async fn dispatch_task(&self, _task: &Task) -> Result<String, String> {
+        async fn dispatch_task(&self, _task: &Task) -> Result<DispatchResult, String> {
             Err("always fails".into())
         }
 
@@ -386,8 +409,8 @@ mod tests {
         struct NeverDoneJudge;
         impl SupervisorJudge for NeverDoneJudge {
             async fn plan_tasks(&self, _goal: &str) -> Vec<Task> { vec![] }
-            async fn dispatch_task(&self, _task: &Task) -> Result<String, String> {
-                Ok("partial".into())
+            async fn dispatch_task(&self, _task: &Task) -> Result<DispatchResult, String> {
+                Ok(DispatchResult { output: "partial".into(), agent_thread_id: None })
             }
             async fn evaluate_completion(&self, _task: &Task, _output: &str) -> bool {
                 false // Never complete — but loop doesn't care, it retries
@@ -410,8 +433,8 @@ mod tests {
         struct EmptyPlanJudge;
         impl SupervisorJudge for EmptyPlanJudge {
             async fn plan_tasks(&self, _goal: &str) -> Vec<Task> { vec![] }
-            async fn dispatch_task(&self, _task: &Task) -> Result<String, String> {
-                Ok("done".into())
+            async fn dispatch_task(&self, _task: &Task) -> Result<DispatchResult, String> {
+                Ok(DispatchResult { output: "done".into(), agent_thread_id: None })
             }
             async fn evaluate_completion(&self, _task: &Task, _output: &str) -> bool { true }
             async fn verify(&self, _task: &Task, _cmd: &str) -> bool { true }
@@ -428,8 +451,8 @@ mod tests {
         struct VerificationFailsOnceJudge { call_count: std::sync::atomic::AtomicU32 }
         impl SupervisorJudge for VerificationFailsOnceJudge {
             async fn plan_tasks(&self, _goal: &str) -> Vec<Task> { vec![] }
-            async fn dispatch_task(&self, _task: &Task) -> Result<String, String> {
-                Ok("done".into())
+            async fn dispatch_task(&self, _task: &Task) -> Result<DispatchResult, String> {
+                Ok(DispatchResult { output: "done".into(), agent_thread_id: None })
             }
             async fn evaluate_completion(&self, _task: &Task, _output: &str) -> bool { true }
             async fn verify(&self, _task: &Task, _cmd: &str) -> bool {
