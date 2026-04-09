@@ -150,11 +150,20 @@ impl Default for UsageConfig {
     }
 }
 
+/// Agent role configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRole {
+    pub nickname: String,
+    pub instructions: String,
+}
+
 /// The full project-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectConfig {
     #[serde(default)]
     pub models: std::collections::HashMap<String, ModelRole>,
+    #[serde(default)]
+    pub roles: std::collections::HashMap<String, AgentRole>,
     #[serde(default)]
     pub routing: RoutingBehavior,
     #[serde(default)]

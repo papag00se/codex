@@ -17,7 +17,9 @@ pub mod local_dispatch;
 pub mod metrics;
 pub mod ollama;
 pub mod project_config;
+pub mod tool_format;
 pub mod tool_recovery;
+pub mod usage;
 
 pub use classifier::{classify_request, ClassifyResult, RouteTarget};
 pub use config::RoutingConfig;

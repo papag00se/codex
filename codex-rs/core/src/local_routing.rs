@@ -26,6 +26,7 @@ struct RoutingState {
     config: RoutingConfig,
     project_config: codex_routing::project_config::ProjectConfig,
     pool: Arc<OllamaClientPool>,
+    usage: codex_routing::usage::UsageTracker,
 }
 
 /// Initialize the global routing state.
@@ -61,13 +62,29 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
                     classifier_model = %config.classifier.model,
                     "Per-request routing enabled — classifier LLM reachable"
                 );
-                Some(RoutingState { config, project_config, pool })
+                let usage = codex_routing::usage::UsageTracker::new(
+                    project_config.usage.primary_warn_threshold,
+                );
+                Some(RoutingState { config, project_config, pool, usage })
             } else {
                 info!("Per-request routing disabled — classifier LLM not reachable, all requests go to cloud");
                 None
             }
         })
         .await
+}
+
+/// Get usage summary string. Returns None if routing is not active.
+pub(crate) async fn usage_summary() -> Option<String> {
+    let state = get_routing_state().await.as_ref()?;
+    Some(state.usage.summary())
+}
+
+/// Record cloud model usage (called from client.rs after cloud responses).
+pub(crate) async fn record_cloud_usage(model: &str, input_tokens: u64, output_tokens: u64) {
+    if let Some(state) = get_routing_state().await.as_ref() {
+        state.usage.record(model, input_tokens, output_tokens);
+    }
 }
 
 /// Result of per-request routing.
@@ -81,10 +98,38 @@ pub(crate) enum RouteResult {
     Default,
 }
 
+/// Check if a prompt contains the compaction sentinel.
+fn is_compaction_request(prompt: &Prompt) -> bool {
+    let text = extract_last_message(prompt);
+    text.contains("<<<LOCAL_COMPACT>>>")
+}
+
 /// Route a request: local model, cloud with model override, or default.
 ///
 /// Called from ModelClientSession::stream() on every model API call.
 pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
+    // Compaction requests always go to the local compactor model.
+    // The proxy on port 8081 handles the actual compaction pipeline,
+    // but if the request reaches us directly, route it local.
+    if is_compaction_request(prompt) {
+        if let Some(state) = get_routing_state().await.as_ref() {
+            if state.config.compactor.enabled {
+                info!("Compaction request detected — routing to local compactor");
+                let messages = prompt_to_ollama_messages(prompt);
+                let system = extract_system_instructions(prompt);
+                if let Ok(response) = call_ollama_text(
+                    &state.pool,
+                    &state.config.compactor,
+                    messages,
+                    system.as_deref(),
+                ).await {
+                    state.usage.record(&response.model, response.input_tokens, response.output_tokens);
+                    return RouteResult::Local(ollama_response_to_stream(response));
+                }
+            }
+        }
+    }
+
     let state = match get_routing_state().await.as_ref() {
         Some(s) => s,
         None => return RouteResult::Default,
@@ -157,10 +202,12 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
 
             match call_ollama_text(&state.pool, endpoint, messages, system.as_deref()).await {
                 Ok(response) => {
+                    state.usage.record(&response.model, response.input_tokens, response.output_tokens);
                     info!(
                         model = %response.model,
                         input_tokens = response.input_tokens,
                         output_tokens = response.output_tokens,
+                        usage_summary = %state.usage.summary(),
                         "Local model response received"
                     );
                     RouteResult::Local(ollama_response_to_stream(response))

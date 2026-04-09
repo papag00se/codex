@@ -86,6 +86,20 @@ review = ["cloud_reasoner", "cloud_coder"]
 planning = ["light_reasoner", "cloud_reasoner", "cloud_coder"]
 evaluation = ["light_reasoner", "light_reasoner_backup", "cloud_mini"]
 
+# --- Agent roles ---
+
+[roles.coder]
+nickname = "Coder"
+instructions = "You are a specialist coding agent. Implement the described change completely. Write clean, correct code. Commit your work when done."
+
+[roles.reviewer]
+nickname = "Reviewer"
+instructions = "You are a code reviewer. Review the diff for bugs, security issues, and style problems. Do not modify files. Report issues with file path and line number."
+
+[roles.test_runner]
+nickname = "Test Runner"
+instructions = "Run the specified test command and interpret the results. Report which tests passed, failed, and why. Do not modify source files."
+
 # --- Usage preservation ---
 
 [usage]
