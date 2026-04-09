@@ -147,16 +147,20 @@ impl ToolHandler for SupervisorHandler {
 
         info!(goal = %args.goal, "Supervisor tool invoked");
 
-        let supervisor_config = SupervisorConfig {
-            max_iterations: 50,
-            timeout: std::time::Duration::from_secs(7200),
-            max_retries_per_task: args.max_retries.unwrap_or(3),
-            verification_command: args.verification_command,
-        };
+        // Load project config for routing and supervisor settings
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let project_config = codex_routing::project_config::ProjectConfig::load(&cwd);
 
-        // Initialize routing — try to find Ollama for local model routing.
-        // If Ollama is not available, all tasks go to the default Codex model.
-        let routing_config = RoutingConfig::from_env();
+        // Supervisor config: prefer tool args, fall back to project config
+        let supervisor_config = SupervisorConfig {
+            max_iterations: project_config.supervisor.max_iterations,
+            timeout: std::time::Duration::from_secs(project_config.supervisor.timeout_seconds),
+            max_retries_per_task: args.max_retries
+                .unwrap_or(project_config.supervisor.max_retries_per_task),
+            verification_command: args.verification_command
+                .or(project_config.supervisor.verification_command.clone()),
+        };
+        let routing_config = RoutingConfig::from_project_config(&project_config);
         let ollama_pool = Arc::new(OllamaClientPool::new());
 
         let judge = CodexJudge {
@@ -485,12 +489,37 @@ impl SupervisorJudge for CodexJudge {
 
         let prompt = format!("{PLANNER_PROMPT}{goal}");
 
-        // Failover chain: reasoner → reasoner_backup → Codex sub-agent
-        let output = self.call_with_failover(
-            &[&self.routing_config.reasoner, &self.routing_config.reasoner_backup],
-            &prompt,
-            "planning",
+        // Use the classifier to decide: plan locally (free) or with cloud (better).
+        // Complex goals need better decomposition — use cloud.
+        // Simple goals can be planned locally.
+        let tool_names: Vec<&str> = vec![];
+        let classification = codex_routing::classifier::classify_request(
+            goal,
+            &tool_names,
+            0,
+            0,
+            &self.routing_config,
+            &self.ollama_pool,
         ).await;
+
+        let output = match classification.route {
+            // Simple goals: plan locally (free)
+            codex_routing::classifier::RouteTarget::LightReasoner
+            | codex_routing::classifier::RouteTarget::LightCoder
+            | codex_routing::classifier::RouteTarget::CloudFast => {
+                info!(route = ?classification.route, "Planning locally (simple goal)");
+                self.call_with_failover(
+                    &[&self.routing_config.reasoner, &self.routing_config.reasoner_backup],
+                    &prompt,
+                    "planning",
+                ).await
+            }
+            // Complex goals: plan with cloud (better decomposition)
+            _ => {
+                info!(route = ?classification.route, "Planning with cloud (complex goal)");
+                self.spawn_and_wait(&prompt).await
+            }
+        };
 
         match output {
             Ok(text) => {
@@ -514,13 +543,10 @@ impl SupervisorJudge for CodexJudge {
             "Dispatching task"
         );
 
-        // On retry, fork from the previous agent's conversation so the new
-        // agent sees what was tried before and why it failed.
-        let fork_from = if task.retry_count > 0 {
-            task.last_agent_thread_id.as_deref()
-        } else {
-            None
-        };
+        // Fork from previous agent's context when available:
+        // - On retry: sees what was tried and why it failed
+        // - On sequential dependency: sees what the prior task produced
+        let fork_from = task.last_agent_thread_id.as_deref();
 
         let (output, thread_id) = self
             .spawn_and_wait_with_fork(&task.description, None, fork_from)

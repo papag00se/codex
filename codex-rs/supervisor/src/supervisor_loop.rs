@@ -164,6 +164,22 @@ async fn run_loop<J: SupervisorJudge>(
 
         // DETERMINISTIC: dispatch all ready tasks
         for task_id in ready {
+            // If this task has dependencies, inherit the last dependency's
+            // thread ID so the new agent has context of prior work.
+            if let Some(task) = graph.get(&task_id) {
+                if task.last_agent_thread_id.is_none() && !task.dependencies.is_empty() {
+                    // Find the most recently completed dependency's thread ID
+                    let dep_thread_id = task.dependencies.iter().rev()
+                        .filter_map(|dep_id| graph.get(dep_id))
+                        .find_map(|dep| dep.last_agent_thread_id.clone());
+                    if let Some(tid) = dep_thread_id {
+                        if let Some(t) = graph.get_mut(&task_id) {
+                            t.last_agent_thread_id = Some(tid);
+                        }
+                    }
+                }
+            }
+
             graph.mark_running(&task_id);
             info!(task = %task_id, iteration, "Dispatching task");
 
