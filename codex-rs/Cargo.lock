@@ -1891,11 +1891,13 @@ dependencies = [
  "codex-response-debug-context",
  "codex-rmcp-client",
  "codex-rollout",
+ "codex-routing",
  "codex-sandboxing",
  "codex-secrets",
  "codex-shell-command",
  "codex-shell-escalation",
  "codex-state",
+ "codex-supervisor",
  "codex-terminal-detection",
  "codex-tools",
  "codex-utils-absolute-path",
@@ -2634,6 +2636,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-routing"
+version = "0.0.0"
+dependencies = [
+ "assert_matches",
+ "pretty_assertions",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codex-sandboxing"
 version = "0.0.0"
 dependencies = [
@@ -2753,6 +2769,18 @@ dependencies = [
  "pretty_assertions",
  "tempfile",
  "uds_windows",
+]
+
+[[package]]
+name = "codex-supervisor"
+version = "0.0.0"
+dependencies = [
+ "codex-routing",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

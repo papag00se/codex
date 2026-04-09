@@ -1409,6 +1409,12 @@ impl ModelClientSession {
         service_tier: Option<ServiceTier>,
         turn_metadata_header: Option<&str>,
     ) -> Result<ResponseStream> {
+        // Per-request routing: try local Ollama for tool-free requests.
+        // Requests with tools go to cloud because local models can't execute them.
+        if let Some(local_stream) = crate::local_routing::try_route_local(prompt).await {
+            return Ok(local_stream);
+        }
+
         let wire_api = self.client.state.provider.wire_api;
         match wire_api {
             WireApi::Responses => {

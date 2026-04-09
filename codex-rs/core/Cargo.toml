@@ -52,6 +52,8 @@ codex-plugin = { workspace = true }
 codex-protocol = { workspace = true }
 codex-response-debug-context = { workspace = true }
 codex-rollout = { workspace = true }
+codex-routing = { workspace = true }
+codex-supervisor = { workspace = true }
 codex-rmcp-client = { workspace = true }
 codex-sandboxing = { workspace = true }
 codex-state = { workspace = true }

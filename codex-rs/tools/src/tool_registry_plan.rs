@@ -213,6 +213,14 @@ pub fn build_tool_registry_plan(
     );
     plan.register_handler("update_plan", ToolHandlerKind::Plan);
 
+    // Supervisor tool — deterministic multi-agent loop.
+    plan.push_spec(
+        crate::create_supervisor_tool(),
+        /*supports_parallel_tool_calls*/ false,
+        config.code_mode_enabled,
+    );
+    plan.register_handler("supervisor", ToolHandlerKind::Supervisor);
+
     if config.has_environment && config.js_repl_enabled {
         plan.push_spec(
             create_js_repl_tool(),
