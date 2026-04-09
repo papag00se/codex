@@ -7,6 +7,7 @@
 - **[Integration Model](integration-model.md) — How multi-agent orchestration fits into the existing Codex agent system**
 - **[Supervisor Integration](supervisor-integration.md) — The supervisor-as-tool approach: thinnest possible integration**
 - **[Implementation Status](implementation-status.md) — What's built, tested, and working right now**
+- **[Gaps and Future Work](gaps.md) — Known gaps, prioritized, with implementation notes**
 - [System Architecture Overview](system-architecture.md) — Layers, run flow, deterministic vs agentic split
 - [Core Architectural Principles](architectural-principles.md) — Bounded loops, event-driven orchestration, durable state, verification-first
 - [System Context Diagram](system-context-diagram.md) — ASCII diagrams of component interactions

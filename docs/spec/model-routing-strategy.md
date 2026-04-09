@@ -2,6 +2,8 @@
 
 [< Spec Index](index.md) | [Design Principles](design-principles.md)
 
+> **Known gaps:** No learned routing profiles (G1), no codebase context in decisions (G2), no warm-model preference for shared GPUs (G6), no per-request quality detection (G7). See [Gaps](gaps.md).
+
 ## Available infrastructure
 
 ### Local Ollama (free, always available)

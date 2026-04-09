@@ -2,6 +2,8 @@
 
 [< Spec Index](index.md) | [Product Index](../product/index.md)
 
+> **Known gaps:** Routing currently has no feedback loop (same decisions regardless of outcomes), no codebase awareness (classifier doesn't know project complexity), and classifier adds 3-4s latency per request. See [Gaps](gaps.md) G1, G2, G8.
+
 ## Why routing exists
 
 Different tasks have different optimal backends. A system that routes everything to one model is either overpaying for simple tasks or underperforming on complex ones.

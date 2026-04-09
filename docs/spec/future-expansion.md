@@ -2,6 +2,8 @@
 
 [< Spec Index](index.md) | [Product Index](../product/index.md)
 
+> See [Gaps](gaps.md) for the prioritized list of known gaps with implementation notes.
+
 ## How the architecture supports future growth
 
 The architecture is designed with explicit extension points. Each future capability maps to existing interfaces.
