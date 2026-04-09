@@ -1,0 +1,93 @@
+# Codex Multi-Agent Configuration
+# Per-working-directory config. Does not affect ~/.codex/config.toml.
+
+# --- Model roles ---
+
+[models.classifier]
+provider = "ollama"
+endpoint = "http://sakura-wsl.taile41496.ts.net:11434"
+model = "qwen3.5-9b:iq4_xs"
+reasoning = "off"
+num_ctx = 4096
+
+[models.light_reasoner]
+provider = "ollama"
+endpoint = "http://sakura-wsl.taile41496.ts.net:11435"
+model = "qwen3.5:9b"
+reasoning = "on"
+num_ctx = 8192
+
+[models.light_reasoner_backup]
+provider = "ollama"
+endpoint = "http://meru-wsl.taile41496.ts.net:11434"
+model = "qwen3.5:9b"
+reasoning = "on"
+num_ctx = 8192
+
+[models.light_coder]
+provider = "ollama"
+endpoint = "http://sakura-wsl.taile41496.ts.net:11435"
+model = "qwen3.5-9b-opus-openclaw-distilled:tools"
+reasoning = "off"
+num_ctx = 8192
+
+[models.compactor]
+provider = "ollama"
+endpoint = "http://sakura-wsl.taile41496.ts.net:11435"
+model = "qwen3.5-9b:iq4_xs"
+reasoning = "off"
+num_ctx = 16384
+
+[models.cloud_fast]
+entries = [
+    { provider = "openai", model = "gpt-5.3-codex-spark", weight = 100, reasoning = "low" },
+]
+
+[models.cloud_mini]
+entries = [
+    { provider = "openai", model = "gpt-5.4-mini", weight = 100, reasoning = "medium" },
+]
+
+[models.cloud_reasoner]
+entries = [
+    { provider = "anthropic", model = "sonnet-4.6", weight = 70, reasoning = "medium" },
+    { provider = "openai", model = "gpt-5.4-mini", weight = 30, reasoning = "medium" },
+]
+
+[models.cloud_coder]
+entries = [
+    { provider = "openai", model = "gpt-5.3-codex-spark", weight = 40, reasoning = "low" },
+    { provider = "openai", model = "gpt-5.4", weight = 30, reasoning = "medium" },
+    { provider = "anthropic", model = "opus-4.6", weight = 30, reasoning = "medium" },
+]
+
+# --- Routing ---
+
+[routing]
+strategy = "cost_first"
+compaction_model = "compactor"
+
+# --- Supervisor ---
+
+[supervisor]
+max_iterations = 50
+timeout_seconds = 7200
+max_retries_per_task = 3
+# verification_command = "pytest tests/"
+
+# --- Failover chains ---
+
+[failover]
+reasoning = ["light_reasoner", "light_reasoner_backup", "cloud_reasoner", "cloud_coder"]
+coding = ["light_coder", "cloud_fast", "cloud_mini", "cloud_reasoner", "cloud_coder"]
+classification = ["classifier", "light_reasoner", "cloud_fast"]
+compaction = ["compactor", "light_reasoner", "cloud_mini"]
+review = ["cloud_reasoner", "cloud_coder"]
+planning = ["light_reasoner", "cloud_reasoner", "cloud_coder"]
+evaluation = ["light_reasoner", "light_reasoner_backup", "cloud_mini"]
+
+# --- Usage preservation ---
+
+[usage]
+primary_warn_threshold = 0.7
+prefer_secondary = true
