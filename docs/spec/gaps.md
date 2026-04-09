@@ -6,8 +6,8 @@
 
 ## Critical gaps (directly impact usefulness)
 
-### G1: No routing feedback loop
-**Status:** Not started
+### G1: Routing feedback loop
+**Status:** DONE (feedback.rs, routing_history.jsonl, profile_context injected into classifier)
 **Impact:** High — same routing mistakes repeated every session
 
 The system makes the same routing decision for the same request type every time. No learning from outcomes. If spark fails 40% of the time on test-fix tasks in this codebase, the classifier doesn't know.
@@ -16,8 +16,8 @@ The system makes the same routing decision for the same request type every time.
 
 **Implementation:** Append routing outcomes to `.codex-multi/routing_history.jsonl`. On startup, compute success rates per model per task-type. Add to classifier context.
 
-### G2: No codebase awareness in classifier
-**Status:** Not started  
+### G2: Codebase awareness in classifier
+**Status:** DONE (codebase_context.rs, auto-detect, cached, injected into classifier)  
 **Impact:** High — "fix the auth bug" classified the same for 500-line Flask app vs 500K-line multi-service platform
 
 The classifier sees the request text but not the codebase. A project context section would let it make better decisions.
@@ -46,24 +46,24 @@ Same task description goes to every model. Weaker models need more scaffolding.
 
 **What's needed:** Per-model prompt templates. More chain-of-thought for local, more concise for cloud.
 
-### G5: No streaming from local models
-**Status:** Not started  
+### G5: Streaming from local models
+**Status:** DEFERRED (requires rework of response translation pipeline)  
 **Impact:** Medium — UI feels frozen during local responses
 
 Ollama calls use `stream: false`. For long responses, the UI shows nothing until complete.
 
 **What's needed:** Use `chat_stream` and translate chunks to `ResponseEvent::OutputTextDelta` in real time.
 
-### G6: GPU-aware model warm preference
-**Status:** Not started  
+### G6: GPU-aware warm model preference
+**Status:** DONE (warm_model tracking in OllamaClientPool)  
 **Impact:** Medium — 10-20s cold-load penalty when switching models on same GPU
 
 Two models on the 3080 at port 11435 (reasoner and coder). Ollama swaps models in/out. The routing should prefer the currently-loaded model.
 
 **What's needed:** Track which model was last used on each endpoint. Prefer warm model if it's ≥80% as good as the optimal choice.
 
-### G7: No per-request quality detection
-**Status:** Not started  
+### G7: Per-request quality detection
+**Status:** DONE (quality.rs, checks before returning, failures recorded to feedback)  
 **Impact:** Medium — local model garbage returned to user without catch
 
 If local model produces hallucination or incomplete response, system returns it as-is. Should detect and re-route to cloud.
