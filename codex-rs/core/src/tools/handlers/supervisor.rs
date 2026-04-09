@@ -224,10 +224,22 @@ impl CodexJudge {
     }
 
     /// Spawn a sub-agent and wait for completion. Returns both the output and thread ID.
+    /// If `fork_from` is provided, the new agent forks from that thread's conversation
+    /// so it has context of what was tried before.
     async fn spawn_and_wait_full(
         &self,
         prompt: &str,
         output_schema: Option<JsonValue>,
+    ) -> Result<(String, String), String> {
+        self.spawn_and_wait_with_fork(prompt, output_schema, None).await
+    }
+
+    /// Spawn a sub-agent, optionally forking from a previous agent's conversation.
+    async fn spawn_and_wait_with_fork(
+        &self,
+        prompt: &str,
+        output_schema: Option<JsonValue>,
+        fork_from: Option<&str>,
     ) -> Result<(String, String), String> {
         let agent_control = &self.session.services.agent_control;
         let config = (*self.turn.config).clone();
@@ -240,10 +252,44 @@ impl CodexJudge {
             final_output_json_schema: output_schema,
         };
 
-        let thread_id = agent_control
-            .spawn_agent(config, initial_op, /*session_source=*/ None)
-            .await
-            .map_err(|e| format!("Failed to spawn agent: {e}"))?;
+        let thread_id = if let Some(parent_tid_str) = fork_from {
+            // Fork from the previous agent's conversation
+            let parent_tid = codex_protocol::ThreadId::from_string(parent_tid_str)
+                .map_err(|e| format!("Invalid parent thread ID: {e}"))?;
+
+            info!(
+                parent = %parent_tid_str,
+                "Forking new agent from previous agent's context"
+            );
+
+            let session_source = codex_protocol::protocol::SessionSource::SubAgent(
+                codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+                    parent_thread_id: parent_tid,
+                    depth: 1,
+                    agent_path: None,
+                    agent_nickname: None,
+                    agent_role: None,
+                },
+            );
+
+            let options = crate::agent::control::SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(format!("supervisor_retry_{}", parent_tid_str)),
+                fork_mode: Some(crate::agent::control::SpawnAgentForkMode::LastNTurns(5)),
+            };
+
+            let live_agent = agent_control
+                .spawn_agent_with_metadata(config, initial_op, Some(session_source), options)
+                .await
+                .map_err(|e| format!("Failed to fork agent: {e}"))?;
+
+            live_agent.thread_id
+        } else {
+            // Fresh spawn — no previous context
+            agent_control
+                .spawn_agent(config, initial_op, /*session_source=*/ None)
+                .await
+                .map_err(|e| format!("Failed to spawn agent: {e}"))?
+        };
 
         let mut status_rx = agent_control
             .subscribe_status(thread_id)
@@ -468,8 +514,17 @@ impl SupervisorJudge for CodexJudge {
             "Dispatching task"
         );
 
-        // Use spawn_and_wait_full to get both output and thread ID
-        let (output, thread_id) = self.spawn_and_wait_full(&task.description, None).await?;
+        // On retry, fork from the previous agent's conversation so the new
+        // agent sees what was tried before and why it failed.
+        let fork_from = if task.retry_count > 0 {
+            task.last_agent_thread_id.as_deref()
+        } else {
+            None
+        };
+
+        let (output, thread_id) = self
+            .spawn_and_wait_with_fork(&task.description, None, fork_from)
+            .await?;
 
         Ok(DispatchResult {
             output,
