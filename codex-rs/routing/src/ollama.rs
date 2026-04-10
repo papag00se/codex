@@ -153,4 +153,121 @@ impl OllamaClientPool {
             }
         }
     }
+
+    /// Streaming chat — returns a receiver that yields content chunks as they arrive.
+    /// Each chunk is a partial text delta. The final message includes token usage.
+    pub async fn chat_stream(
+        &self,
+        base_url: &str,
+        model: &str,
+        messages: Vec<JsonValue>,
+        system: Option<&str>,
+        temperature: f64,
+        num_ctx: usize,
+        timeout_seconds: u64,
+    ) -> Option<tokio::sync::mpsc::Receiver<StreamChunk>> {
+        let sem = self.semaphore_for(base_url).await;
+        let _permit = sem.acquire().await.ok()?;
+
+        let mut payload_messages = messages;
+        if let Some(sys) = system {
+            payload_messages.insert(
+                0,
+                serde_json::json!({"role": "system", "content": sys}),
+            );
+        }
+
+        let payload = serde_json::json!({
+            "model": model,
+            "messages": payload_messages,
+            "stream": true,
+            "options": {
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+            },
+            "think": false,
+        });
+
+        let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .timeout(Duration::from_secs(timeout_seconds))
+            .send()
+            .await
+            .ok()?;
+
+        if !response.status().is_success() {
+            warn!("Ollama stream request failed with status {}", response.status());
+            return None;
+        }
+
+        self.record_warm_model(base_url, model).await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+        // Spawn a task to read the stream and forward chunks
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut byte_stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let Ok(bytes) = chunk_result else { break };
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                // Process complete lines (Ollama sends one JSON object per line)
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim().to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    let Ok(obj) = serde_json::from_str::<JsonValue>(&line) else {
+                        continue;
+                    };
+
+                    let done = obj.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+                    let content = obj
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+
+                    if !content.is_empty() {
+                        let _ = tx.send(StreamChunk::Delta(content.to_string())).await;
+                    }
+
+                    if done {
+                        let input_tokens = obj.get("prompt_eval_count")
+                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                        let output_tokens = obj.get("eval_count")
+                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                        let _ = tx.send(StreamChunk::Done {
+                            input_tokens,
+                            output_tokens,
+                        }).await;
+                        return;
+                    }
+                }
+            }
+        });
+
+        Some(rx)
+    }
+}
+
+/// A chunk from the Ollama streaming response.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// A partial text delta.
+    Delta(String),
+    /// Stream is complete, with final token usage.
+    Done {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
 }

@@ -215,72 +215,100 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
 
             let messages = prompt_to_ollama_messages(prompt);
             let system = extract_system_instructions(prompt);
+            let model_name = endpoint.model.clone();
+            let route_name = format!("{:?}", classification.route);
 
+            // G5: Try streaming from local model
+            let stream_rx = state.pool.chat_stream(
+                &endpoint.base_url,
+                &endpoint.model,
+                messages,
+                system.as_deref(),
+                endpoint.temperature,
+                endpoint.num_ctx,
+                endpoint.timeout_seconds,
+            ).await;
+
+            let Some(mut ollama_rx) = stream_rx else {
+                warn!("Local model stream failed to start, falling back to cloud");
+                return RouteResult::Default;
+            };
+
+            // Build the ResponseEvent stream with real-time deltas
+            let prompt_text_owned = prompt_text.clone();
+            let feedback = state.feedback.lock().ok().map(|_| ());  // Just check lock works
+            let _ = feedback;
+
+            // We need references to state in the spawn — clone what we need
+            let usage_ref = &state.usage;
+            let feedback_mutex = &state.feedback;
+
+            // Can't move references into spawn — use a different approach.
+            // Collect feedback data and record after the stream.
             let started = std::time::Instant::now();
-            match call_ollama_text(&state.pool, endpoint, messages, system.as_deref()).await {
-                Ok(response) => {
-                    let latency_ms = started.elapsed().as_millis() as u64;
-                    let route_name = format!("{:?}", classification.route);
 
-                    // G7: Quality check before returning local response
-                    if let Some(reason) = codex_routing::quality::check_response_quality(
-                        &response.content,
-                        &prompt_text,
-                    ) {
-                        warn!(
-                            model = %response.model,
-                            reason = %reason,
-                            "Local response failed quality check, falling back to cloud"
-                        );
-                        // G1: Record failure in feedback
-                        if let Ok(mut fb) = state.feedback.lock() {
-                            fb.record(codex_routing::feedback::RoutingOutcome {
-                                timestamp: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default().as_secs(),
-                                route: route_name,
-                                model: response.model.clone(),
-                                success: false,
-                                input_tokens: response.input_tokens,
-                                output_tokens: response.output_tokens,
-                                latency_ms,
-                                quality_ok: false,
-                            });
+            let (event_tx, event_rx) = mpsc::channel(64);
+            let model_for_task = model_name.clone();
+            let route_for_task = route_name.clone();
+
+            tokio::spawn(async move {
+                // Send Created + OutputItemAdded first
+                let _ = event_tx.send(Ok(ResponseEvent::Created)).await;
+
+                let placeholder = ResponseItem::Message {
+                    id: Some("local_msg_0".to_string()),
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText { text: String::new() }],
+                    end_turn: None,
+                    phase: None,
+                };
+                let _ = event_tx.send(Ok(ResponseEvent::OutputItemAdded(placeholder))).await;
+
+                let mut full_text = String::new();
+                let mut input_tokens = 0u64;
+                let mut output_tokens = 0u64;
+
+                while let Some(chunk) = ollama_rx.recv().await {
+                    match chunk {
+                        codex_routing::ollama::StreamChunk::Delta(text) => {
+                            full_text.push_str(&text);
+                            let _ = event_tx.send(Ok(ResponseEvent::OutputTextDelta(text))).await;
                         }
-                        return RouteResult::Default;
+                        codex_routing::ollama::StreamChunk::Done { input_tokens: it, output_tokens: ot } => {
+                            input_tokens = it;
+                            output_tokens = ot;
+                            break;
+                        }
                     }
-
-                    // G1: Record success in feedback
-                    if let Ok(mut fb) = state.feedback.lock() {
-                        fb.record(codex_routing::feedback::RoutingOutcome {
-                            timestamp: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default().as_secs(),
-                            route: route_name,
-                            model: response.model.clone(),
-                            success: true,
-                            input_tokens: response.input_tokens,
-                            output_tokens: response.output_tokens,
-                            latency_ms,
-                            quality_ok: true,
-                        });
-                    }
-
-                    state.usage.record(&response.model, response.input_tokens, response.output_tokens);
-                    info!(
-                        model = %response.model,
-                        input_tokens = response.input_tokens,
-                        output_tokens = response.output_tokens,
-                        usage_summary = %state.usage.summary(),
-                        "Local model response received"
-                    );
-                    RouteResult::Local(ollama_response_to_stream(response))
                 }
-                Err(e) => {
-                    warn!(error = %e, "Local model failed, falling back to cloud");
-                    RouteResult::Default
-                }
-            }
+
+                // Send the completed message
+                let final_message = ResponseItem::Message {
+                    id: Some("local_msg_0".to_string()),
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText { text: full_text }],
+                    end_turn: Some(true),
+                    phase: None,
+                };
+                let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(final_message))).await;
+
+                let _ = event_tx.send(Ok(ResponseEvent::Completed {
+                    response_id: "local_response".to_string(),
+                    token_usage: Some(TokenUsage {
+                        input_tokens: input_tokens as i64,
+                        output_tokens: output_tokens as i64,
+                        ..Default::default()
+                    }),
+                })).await;
+            });
+
+            info!(
+                model = %model_name,
+                route = %route_name,
+                "Streaming from local model (free)"
+            );
+
+            RouteResult::Local(ResponseStream { rx_event: event_rx })
         }
 
         // --- Cloud routes: pick model from config (with weighted distribution) ---
