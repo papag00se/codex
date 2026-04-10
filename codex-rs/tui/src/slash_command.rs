@@ -50,6 +50,7 @@ pub enum SlashCommand {
     Feedback,
     Rollout,
     Ps,
+    Stats,
     #[strum(to_string = "stop", serialize = "clean")]
     Stop,
     Clear,
@@ -91,6 +92,7 @@ impl SlashCommand {
             SlashCommand::Statusline => "configure which items appear in the status line",
             SlashCommand::Theme => "choose a syntax highlighting theme",
             SlashCommand::Ps => "list background terminals",
+            SlashCommand::Stats => "show routing metrics and token savings",
             SlashCommand::Stop => "stop all background terminals",
             SlashCommand::MemoryDrop => "DO NOT USE",
             SlashCommand::MemoryUpdate => "DO NOT USE",
@@ -165,6 +167,7 @@ impl SlashCommand {
             | SlashCommand::Mention
             | SlashCommand::Skills
             | SlashCommand::Status
+            | SlashCommand::Stats
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop

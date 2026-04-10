@@ -4300,6 +4300,9 @@ impl App {
                 self.enqueue_thread_history_entry_response(thread_id, event)
                     .await?;
             }
+            AppEvent::StatsResult(text) => {
+                self.chat_widget.add_info_message(text, None);
+            }
             AppEvent::DiffResult(text) => {
                 // Clear the in-progress state in the bottom pane
                 self.chat_widget.on_diff_complete();

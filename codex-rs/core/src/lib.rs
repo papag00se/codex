@@ -10,7 +10,7 @@ mod apps;
 mod arc_monitor;
 mod client;
 mod client_common;
-mod local_routing;
+pub mod local_routing;
 pub(crate) mod codex;
 mod realtime_context;
 mod realtime_conversation;

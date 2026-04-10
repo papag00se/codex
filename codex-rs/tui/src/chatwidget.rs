@@ -5274,6 +5274,16 @@ impl ChatWidget {
             SlashCommand::Ps => {
                 self.add_ps_output();
             }
+            SlashCommand::Stats => {
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    let text = match codex_core::local_routing::usage_summary().await {
+                        Some(summary) => summary,
+                        None => "Routing not active (no local models configured).".into(),
+                    };
+                    tx.send(AppEvent::StatsResult(text));
+                });
+            }
             SlashCommand::Stop => {
                 self.clean_background_terminals();
             }

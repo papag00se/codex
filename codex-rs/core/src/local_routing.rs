@@ -88,7 +88,8 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
 }
 
 /// Get usage summary string. Returns None if routing is not active.
-pub(crate) async fn usage_summary() -> Option<String> {
+/// Called from the TUI `/stats` command.
+pub async fn usage_summary() -> Option<String> {
     let state = get_routing_state().await.as_ref()?;
     Some(state.usage.summary())
 }
@@ -552,6 +553,9 @@ async fn try_local_model(
                 "Local coder response received"
             );
 
+            // Record local usage for /stats
+            state.usage.record(&model_name, input_tokens, output_tokens);
+
             return Ok(ollama_tool_response_to_stream(
                 content,
                 native_tool_calls,
@@ -582,6 +586,7 @@ async fn try_local_model(
     };
 
     let (event_tx, event_rx) = mpsc::channel(64);
+    let model_for_usage = model_name.clone();
     let model_for_task = model_name.clone();
     let route_for_task = route_name.clone();
 
@@ -613,6 +618,11 @@ async fn try_local_model(
                     break;
                 }
             }
+        }
+
+        // Record local usage for /stats
+        if let Some(state) = get_routing_state().await.as_ref() {
+            state.usage.record(&model_for_usage, input_tokens, output_tokens);
         }
 
         let recovered = codex_routing::tool_recovery::recover_tool_calls(&full_text, false);

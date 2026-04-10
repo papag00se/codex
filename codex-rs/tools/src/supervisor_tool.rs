@@ -26,16 +26,16 @@ pub fn create_supervisor_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "supervisor".to_string(),
         description:
-            "You SHOULD use this tool when the user's goal involves multiple files, \
-             multiple sequential steps, running tests, or any task that benefits from \
-             automatic retry on failure. \
-             The supervisor decomposes the goal into subtasks, routes each to the best available model, \
-             dispatches specialist agents, verifies results, and retries failures automatically. \
-             The workflow runs to completion without stopping for confirmation. \
-             Examples of when to use: 'implement feature X with tests', 'refactor module Y across files', \
-             'fix bug Z and verify with test suite', 'create new service with API + tests + docs'. \
-             Do NOT use for single-file edits, simple questions, or code review."
-                .to_string(),
+            "You SHOULD use this tool when the task can benefit from supervised multi-step execution rather than a single direct response. \
+            Prefer it for: \
+            - multi-file or multi-component changes \
+            - implementation plus verification with tests, builds, or checks \
+            - tasks that require sequential subtasks \
+            - retry-until-successful repair or work loops \
+            - work that benefits from specialist agent delegation \
+            The supervisor decomposes the goal, assigns subtasks, verifies results, and automatically retries failures until completion or a concrete blocker is reached. \
+            Do not use for single-file edits, simple questions, small isolated changes, or review-only tasks."
+            .to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
