@@ -5567,6 +5567,9 @@ impl App {
         app_server: &mut AppServerSession,
         mode: ExitMode,
     ) -> AppRunControl {
+        // Record routing usage to persistent log before exiting.
+        codex_core::local_routing::record_session_usage().await;
+
         match mode {
             ExitMode::ShutdownFirst => {
                 // Mark the thread we are explicitly shutting down for exit so

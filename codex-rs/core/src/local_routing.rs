@@ -87,6 +87,53 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
         .await
 }
 
+/// Record session usage to `.codex-multi/usage_log.jsonl`.
+/// Called at session exit from the TUI.
+pub async fn record_session_usage() {
+    let Some(state) = get_routing_state().await.as_ref() else { return };
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let analytics = codex_routing::cost_analytics::CostAnalytics::new(&cwd);
+
+    let local = state.usage.local_usage();
+    let secondary = state.usage.secondary_usage();
+    let primary = state.usage.primary_usage();
+    let total_requests = local.request_count + secondary.request_count + primary.request_count;
+    let total_tokens = local.total_tokens() + secondary.total_tokens() + primary.total_tokens();
+
+    if total_requests == 0 {
+        return; // Nothing to record
+    }
+
+    let savings_pct = if total_requests > 0 {
+        ((local.request_count + secondary.request_count) as f64 / total_requests as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let summary = codex_routing::cost_analytics::SessionUsageSummary {
+        session_id: format!("session_{timestamp}"),
+        timestamp,
+        duration_seconds: 0, // We don't track session duration
+        local_requests: local.request_count,
+        local_tokens: local.total_tokens(),
+        secondary_requests: secondary.request_count,
+        secondary_tokens: secondary.total_tokens(),
+        primary_requests: primary.request_count,
+        primary_tokens: primary.total_tokens(),
+        total_requests,
+        total_tokens,
+        estimated_savings_pct: savings_pct,
+    };
+
+    analytics.record_session(&summary);
+}
+
 /// Get usage summary string. Returns None if routing is not active.
 /// Called from the TUI `/stats` command.
 pub async fn usage_summary() -> Option<String> {
