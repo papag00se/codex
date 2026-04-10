@@ -22,7 +22,6 @@ use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use codex_routing::config::RoutingConfig;
-use codex_routing::engine::route_task;
 use codex_routing::OllamaClientPool;
 use codex_supervisor::run_supervisor;
 use codex_supervisor::DispatchResult;
@@ -393,43 +392,6 @@ impl CodexJudge {
     }
 
     /// Route a task and dispatch accordingly.
-    ///
-    /// Routing decides the *intent* (local vs cloud), but coding tasks always
-    /// go to Codex sub-agents because they need tool access (file write, shell).
-    /// Local Ollama is used for judgment calls (planning, evaluation) where
-    /// the task is text-in/text-out with no side effects.
-    ///
-    /// For coding tasks routed to "local_coder", we still use a Codex sub-agent
-    /// but log the routing decision so we know what the router *would* have chosen.
-    /// In the future, when Codex supports Ollama as a model provider, we can
-    /// pass the local model as a config override.
-    async fn route_and_dispatch(&self, task: &SupervisorTask) -> Result<String, String> {
-        let decision = route_task(
-            "",
-            &task.description,
-            &task.description,
-            "",
-            0,
-            None,
-            &self.routing_config,
-            &self.ollama_pool,
-        ).await;
-
-        info!(
-            task_id = %task.id,
-            route = %decision.route,
-            confidence = decision.confidence,
-            reason = %decision.reason,
-            "Routing decision (advisory — coding tasks always use Codex sub-agent for tool access)"
-        );
-
-        // All coding tasks go through Codex sub-agents because they need tool
-        // access (file write, shell exec, etc.). Local Ollama can't do that.
-        // The routing decision is logged for observability and will be actionable
-        // once Codex supports Ollama as a model provider.
-        self.spawn_and_wait(&task.description).await
-    }
-
     fn parse_plan(&self, output: &str, goal: &str) -> Vec<SupervisorTask> {
         let tasks: Vec<PlanTask> = if let Ok(wrapper) = serde_json::from_str::<PlanWrapper>(output.trim()) {
             wrapper.tasks
