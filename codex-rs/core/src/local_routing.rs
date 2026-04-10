@@ -272,6 +272,61 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
         return RouteResult::Default;
     }
 
+    // Sticky routing: if the conversation has recent local coder tool calls,
+    // skip classification and stay on LightCoder. Prevents mid-tool-loop
+    // rerouting which breaks multi-turn tool sequences.
+    if has_pending_local_tool_loop(prompt) {
+        info!("Sticky routing: local coder tool loop in progress, skipping classifier");
+        let classification = codex_routing::classifier::ClassifyResult {
+            route: RouteTarget::LightCoder,
+            tools_potential: true,
+            reason: "sticky: local coder tool loop in progress".into(),
+        };
+        if let Ok(mut cache) = state.classify_cache.lock() {
+            cache.record(&classification);
+        }
+        let chain_name = chain_name_for_route(&classification.route);
+        let initial_role = role_name_for_route(&classification.route);
+        let chain = state.project_config.failover_chain(chain_name).to_vec();
+        let behavior = &state.project_config.failover.behavior;
+        let mut current_role = initial_role.to_string();
+        let mut attempt: u32 = 0;
+
+        loop {
+            match resolve_role(&current_role, state) {
+                Some(ResolvedRole::Cloud(slug)) => {
+                    return RouteResult::CloudOverride {
+                        slug,
+                        failover_ctx: Some(CloudFailoverCtx {
+                            role_name: current_role.clone(),
+                            chain_name: chain_name.to_string(),
+                            chain: chain.clone(),
+                            behavior: behavior.clone(),
+                        }),
+                    };
+                }
+                Some(ResolvedRole::Local(endpoint)) => {
+                    match try_local_model(prompt, &endpoint, &classification.route, &classification, state).await {
+                        Ok(stream) => return RouteResult::Local(stream),
+                        Err(ft) => {
+                            match failover::decide_action(ft, &current_role, chain_name, &chain, attempt, None, behavior) {
+                                FailoverAction::RetrySame { wait, attempt: n } => { tokio::time::sleep(wait).await; attempt = n; }
+                                FailoverAction::NextInChain { model_role, .. } => { current_role = model_role; attempt = 0; }
+                                _ => return RouteResult::Default,
+                            }
+                        }
+                    }
+                }
+                None => {
+                    match failover::decide_action(FailureType::ModelNotFound, &current_role, chain_name, &chain, 0, None, behavior) {
+                        FailoverAction::NextInChain { model_role, .. } => { current_role = model_role; attempt = 0; }
+                        _ => return RouteResult::Default,
+                    }
+                }
+            }
+        }
+    }
+
     // Extract tool names (just names, not full schemas)
     let tool_names: Vec<&str> = prompt
         .tools
@@ -985,6 +1040,43 @@ fn ollama_response_to_stream_with_tools(response: OllamaTextResponse) -> Respons
 }
 
 // --- Prompt extraction helpers ---
+
+/// Detect if the conversation has a pending local coder tool loop.
+/// Returns true if the last assistant turn was a local coder FunctionCall
+/// (identified by `local_call_*` or `local_fc_*` IDs) that has been executed
+/// but the assistant hasn't given a final response yet.
+///
+/// This enables sticky routing: the next turn stays on the same local coder
+/// instead of being re-classified (which would break the tool loop).
+fn has_pending_local_tool_loop(prompt: &Prompt) -> bool {
+    // Walk backwards through the conversation. If we find:
+    // 1. A FunctionCallOutput with a local_call_* call_id, AND
+    // 2. No subsequent Message from the assistant with end_turn=true
+    // Then we're in an active local tool loop.
+    let mut found_local_output = false;
+
+    for item in prompt.input.iter().rev() {
+        match item {
+            ResponseItem::FunctionCall { call_id, .. } => {
+                if call_id.starts_with("local_call_") || call_id.starts_with("local_fc_") {
+                    // Found a local coder tool call — we're in a tool loop
+                    return true;
+                }
+            }
+            ResponseItem::Message { role, end_turn, .. } => {
+                if role == "assistant" && *end_turn == Some(true) {
+                    // Assistant gave a final answer — loop is done
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Also check ResponseInputItems (these are how the prompt stores prior turns)
+    // The FunctionCallOutput items carry the call_id from the original FunctionCall
+    false
+}
 
 /// Extract the last user message from the prompt.
 /// This is what the classifier sees — just the current request, not full history.
