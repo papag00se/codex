@@ -276,7 +276,69 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
             let model_name = endpoint.model.clone();
             let route_name = format!("{:?}", classification.route);
 
-            // G5: Try streaming from local model
+            // For LightCoder: pass ESSENTIAL tools only (shell, file ops).
+            // Not all 97 tools — that would fill the entire context window.
+            // For LightReasoner: no tools (saves context).
+            let use_tools = route == RouteTarget::LightCoder && classification.tools_potential;
+            if use_tools {
+                // Only pass tools the local model can usefully call
+                let essential_tools = ["shell", "local_shell", "apply_patch",
+                    "read_file", "list_dir", "text_editor"];
+                let tool_json: Vec<serde_json::Value> = prompt.tools.iter()
+                    .filter(|t| essential_tools.contains(&t.name()))
+                    .filter_map(|t| serde_json::to_value(t).ok())
+                    .collect();
+                let ollama_tools = codex_routing::tool_format::to_ollama_tools(&tool_json);
+
+                info!(
+                    tool_count = ollama_tools.len(),
+                    "Passing tools to local coder"
+                );
+
+                // Use non-streaming path with tools for now
+                // (streaming + tools is complex — the model may emit tool calls mid-stream)
+                let result = state.pool.chat_with_tools(
+                    &endpoint.base_url,
+                    &endpoint.model,
+                    messages.clone(),
+                    system.as_deref(),
+                    endpoint.temperature,
+                    endpoint.num_ctx,
+                    None,
+                    endpoint.timeout_seconds,
+                    Some(ollama_tools),
+                ).await;
+
+                if let Some(body) = result {
+                    let message = body.get("message").cloned().unwrap_or_default();
+                    let content = message.get("content")
+                        .and_then(|c| c.as_str()).unwrap_or("").to_string();
+                    let native_tool_calls = message.get("tool_calls")
+                        .and_then(|tc| tc.as_array()).cloned().unwrap_or_default();
+                    let input_tokens = body.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let output_tokens = body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                    info!(
+                        content_len = content.len(),
+                        native_tool_calls = native_tool_calls.len(),
+                        "Local coder response received"
+                    );
+
+                    // Build response — handle both native tool_calls and embedded ones
+                    return RouteResult::Local(ollama_tool_response_to_stream(
+                        content,
+                        native_tool_calls,
+                        model_name.clone(),
+                        input_tokens,
+                        output_tokens,
+                    ));
+                } else {
+                    warn!("Local coder with tools failed, falling back to cloud");
+                    return RouteResult::Default;
+                }
+            }
+
+            // G5: Try streaming from local model (no tools — reasoner path)
             let stream_rx = state.pool.chat_stream(
                 &endpoint.base_url,
                 &endpoint.model,
@@ -340,15 +402,50 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
                     }
                 }
 
-                // Send the completed message
-                let final_message = ResponseItem::Message {
-                    id: Some("local_msg_0".to_string()),
-                    role: "assistant".to_string(),
-                    content: vec![ContentItem::OutputText { text: full_text }],
-                    end_turn: Some(true),
-                    phase: None,
-                };
-                let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(final_message))).await;
+                // Check for tool calls in the response (local coder may emit them)
+                let recovered = codex_routing::tool_recovery::recover_tool_calls(&full_text, false);
+
+                if recovered.tool_calls.is_empty() {
+                    // Pure text response — send as message
+                    let final_message = ResponseItem::Message {
+                        id: Some("local_msg_0".to_string()),
+                        role: "assistant".to_string(),
+                        content: vec![ContentItem::OutputText { text: full_text }],
+                        end_turn: Some(true),
+                        phase: None,
+                    };
+                    let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(final_message))).await;
+                } else {
+                    // Has tool calls — send text message then function calls
+                    if !recovered.content.is_empty() {
+                        let text_message = ResponseItem::Message {
+                            id: Some("local_msg_0".to_string()),
+                            role: "assistant".to_string(),
+                            content: vec![ContentItem::OutputText { text: recovered.content }],
+                            end_turn: None,
+                            phase: None,
+                        };
+                        let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(text_message))).await;
+                    }
+
+                    // Emit each tool call as a FunctionCall item
+                    for (i, tc) in recovered.tool_calls.iter().enumerate() {
+                        let call_id = tc.id.clone()
+                            .unwrap_or_else(|| format!("local_call_{i}"));
+                        let arguments = serde_json::to_string(&tc.arguments)
+                            .unwrap_or_else(|_| "{}".into());
+
+                        let func_call = ResponseItem::FunctionCall {
+                            id: Some(format!("local_fc_{i}")),
+                            name: tc.name.clone(),
+                            namespace: None,
+                            arguments,
+                            call_id,
+                        };
+                        let _ = event_tx.send(Ok(ResponseEvent::OutputItemAdded(func_call.clone()))).await;
+                        let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(func_call))).await;
+                    }
+                }
 
                 let _ = event_tx.send(Ok(ResponseEvent::Completed {
                     response_id: "local_response".to_string(),
@@ -493,6 +590,154 @@ fn ollama_response_to_stream(response: OllamaTextResponse) -> ResponseStream {
                 }),
             }))
             .await;
+    });
+
+    ResponseStream { rx_event: rx }
+}
+
+/// Convert an Ollama response with native tool_calls to a ResponseStream.
+/// Handles both native Ollama tool_calls and embedded JSON tool calls.
+fn ollama_tool_response_to_stream(
+    content: String,
+    native_tool_calls: Vec<serde_json::Value>,
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> ResponseStream {
+    let (tx, rx) = mpsc::channel(16);
+
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(ResponseEvent::Created)).await;
+
+        // Emit text content if any
+        if !content.is_empty() {
+            let text_msg = ResponseItem::Message {
+                id: Some("local_msg_0".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText { text: content.clone() }],
+                end_turn: Some(native_tool_calls.is_empty()),
+                phase: None,
+            };
+            let _ = tx.send(Ok(ResponseEvent::OutputItemAdded(text_msg.clone()))).await;
+            let _ = tx.send(Ok(ResponseEvent::OutputItemDone(text_msg))).await;
+        }
+
+        // Emit native tool calls from Ollama
+        for (i, tc) in native_tool_calls.iter().enumerate() {
+            let func = tc.get("function").unwrap_or(tc);
+            let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string();
+            let call_id = tc.get("id").and_then(|id| id.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("local_call_{i}"));
+            let arguments = func.get("arguments")
+                .map(|a| {
+                    if a.is_string() { a.as_str().unwrap_or("{}").to_string() }
+                    else { serde_json::to_string(a).unwrap_or_else(|_| "{}".into()) }
+                })
+                .unwrap_or_else(|| "{}".into());
+
+            let func_call = ResponseItem::FunctionCall {
+                id: Some(format!("local_fc_{i}")),
+                name,
+                namespace: None,
+                arguments,
+                call_id,
+            };
+            let _ = tx.send(Ok(ResponseEvent::OutputItemAdded(func_call.clone()))).await;
+            let _ = tx.send(Ok(ResponseEvent::OutputItemDone(func_call))).await;
+        }
+
+        // If no native tool calls, try recovering embedded ones from text
+        if native_tool_calls.is_empty() && !content.is_empty() {
+            let recovered = codex_routing::tool_recovery::recover_tool_calls(&content, false);
+            for (i, tc) in recovered.tool_calls.iter().enumerate() {
+                let call_id = tc.id.clone().unwrap_or_else(|| format!("local_call_{i}"));
+                let arguments = serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into());
+                let func_call = ResponseItem::FunctionCall {
+                    id: Some(format!("local_fc_{i}")),
+                    name: tc.name.clone(),
+                    namespace: None,
+                    arguments,
+                    call_id,
+                };
+                let _ = tx.send(Ok(ResponseEvent::OutputItemAdded(func_call.clone()))).await;
+                let _ = tx.send(Ok(ResponseEvent::OutputItemDone(func_call))).await;
+            }
+        }
+
+        let _ = tx.send(Ok(ResponseEvent::Completed {
+            response_id: "local_response".to_string(),
+            token_usage: Some(TokenUsage {
+                input_tokens: input_tokens as i64,
+                output_tokens: output_tokens as i64,
+                ..Default::default()
+            }),
+        })).await;
+    });
+
+    ResponseStream { rx_event: rx }
+}
+
+/// Convert an Ollama response with potential tool calls into a ResponseStream.
+/// Runs tool-call recovery to extract embedded function calls.
+#[allow(dead_code)]
+fn ollama_response_to_stream_with_tools(response: OllamaTextResponse) -> ResponseStream {
+    let (tx, rx) = mpsc::channel(16);
+
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(ResponseEvent::Created)).await;
+
+        let recovered = codex_routing::tool_recovery::recover_tool_calls(&response.content, false);
+
+        if recovered.tool_calls.is_empty() {
+            // No tool calls — just text
+            let message = ResponseItem::Message {
+                id: Some("local_msg_0".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText { text: response.content }],
+                end_turn: Some(true),
+                phase: None,
+            };
+            let _ = tx.send(Ok(ResponseEvent::OutputItemAdded(message.clone()))).await;
+            let _ = tx.send(Ok(ResponseEvent::OutputItemDone(message))).await;
+        } else {
+            // Has tool calls
+            if !recovered.content.is_empty() {
+                let text_msg = ResponseItem::Message {
+                    id: Some("local_msg_0".to_string()),
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText { text: recovered.content }],
+                    end_turn: None,
+                    phase: None,
+                };
+                let _ = tx.send(Ok(ResponseEvent::OutputItemAdded(text_msg.clone()))).await;
+                let _ = tx.send(Ok(ResponseEvent::OutputItemDone(text_msg))).await;
+            }
+
+            for (i, tc) in recovered.tool_calls.iter().enumerate() {
+                let call_id = tc.id.clone().unwrap_or_else(|| format!("local_call_{i}"));
+                let arguments = serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into());
+
+                let func_call = ResponseItem::FunctionCall {
+                    id: Some(format!("local_fc_{i}")),
+                    name: tc.name.clone(),
+                    namespace: None,
+                    arguments,
+                    call_id,
+                };
+                let _ = tx.send(Ok(ResponseEvent::OutputItemAdded(func_call.clone()))).await;
+                let _ = tx.send(Ok(ResponseEvent::OutputItemDone(func_call))).await;
+            }
+        }
+
+        let _ = tx.send(Ok(ResponseEvent::Completed {
+            response_id: "local_response".to_string(),
+            token_usage: Some(TokenUsage {
+                input_tokens: response.input_tokens as i64,
+                output_tokens: response.output_tokens as i64,
+                ..Default::default()
+            }),
+        })).await;
     });
 
     ResponseStream { rx_event: rx }
