@@ -30,6 +30,7 @@ struct RoutingState {
     feedback: std::sync::Mutex<codex_routing::feedback::FeedbackStore>,
     codebase_context: codex_routing::codebase_context::CodebaseContext,
     classify_cache: std::sync::Mutex<codex_routing::classify_cache::ClassifyCache>,
+    budget: Arc<codex_routing::budget_pressure::BudgetState>,
 }
 
 /// Initialize the global routing state.
@@ -75,7 +76,8 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
                 let classify_cache = std::sync::Mutex::new(
                     codex_routing::classify_cache::ClassifyCache::new(),
                 );
-                Some(RoutingState { config, project_config, pool, usage, feedback, codebase_context, classify_cache })
+                let budget = Arc::new(codex_routing::budget_pressure::BudgetState::new());
+                Some(RoutingState { config, project_config, pool, usage, feedback, codebase_context, classify_cache, budget })
             } else {
                 info!("Per-request routing disabled — classifier LLM not reachable, all requests go to cloud");
                 None
@@ -94,6 +96,14 @@ pub(crate) async fn usage_summary() -> Option<String> {
 pub(crate) async fn record_cloud_usage(model: &str, input_tokens: u64, output_tokens: u64) {
     if let Some(state) = get_routing_state().await.as_ref() {
         state.usage.record(model, input_tokens, output_tokens);
+    }
+}
+
+/// Update budget state from rate limit headers (called after cloud responses).
+/// primary_pct and secondary_pct are 0.0-100.0.
+pub(crate) async fn update_budget(primary_pct: f64, secondary_pct: f64, primary_reset: Option<u64>) {
+    if let Some(state) = get_routing_state().await.as_ref() {
+        state.budget.update(primary_pct, secondary_pct, primary_reset);
     }
 }
 
@@ -185,6 +195,14 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
             .unwrap_or_default();
         let codebase_ctx = state.codebase_context.classifier_context();
 
+        // G14: Add budget pressure to classifier context
+        let budget_ctx = state.budget.pressure_context();
+        let full_context = if budget_ctx.is_empty() {
+            codebase_ctx.clone()
+        } else {
+            format!("{codebase_ctx}\n{budget_ctx}")
+        };
+
         let result = codex_routing::classifier::classify_request_with_context(
             &prompt_text,
             &tool_names,
@@ -193,7 +211,7 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
             &state.config,
             &state.pool,
             &routing_profile,
-            &codebase_ctx,
+            &full_context,
         )
         .await;
 
@@ -205,7 +223,20 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
         result
     };
 
-    match classification.route {
+    // G14: Hard-block primary if budget is critical (deterministic, not LLM)
+    let route = if state.budget.should_block_primary()
+        && classification.route == RouteTarget::CloudCoder
+    {
+        warn!(
+            primary_used = state.budget.primary_used(),
+            "Primary budget critical — downgrading cloud_coder to cloud_reasoner"
+        );
+        RouteTarget::CloudReasoner
+    } else {
+        classification.route
+    };
+
+    match route {
         // --- Local routes: call Ollama directly ---
         RouteTarget::LightReasoner | RouteTarget::LightCoder => {
             let endpoint = match classification.route {

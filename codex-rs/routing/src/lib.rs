@@ -10,6 +10,7 @@
 //! - Ollama HTTP client with per-endpoint serialization
 //! - Routing configuration
 
+pub mod budget_pressure;
 pub mod classifier;
 pub mod classify_cache;
 pub mod codebase_context;
