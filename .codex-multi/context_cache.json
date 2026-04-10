@@ -1,0 +1,23 @@
+{
+  "languages": [
+    "Rust",
+    "Python",
+    "TypeScript",
+    "SQL",
+    "Shell",
+    "C",
+    "JavaScript",
+    "HTML"
+  ],
+  "file_count": 2515,
+  "test_frameworks": [
+    "pytest"
+  ],
+  "build_tools": [
+    "npm",
+    "cargo"
+  ],
+  "has_docker": true,
+  "has_ci": false,
+  "estimated_complexity": "large"
+}

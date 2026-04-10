@@ -101,4 +101,5 @@ Send same prompt to cheap + expensive model in parallel. Take first good respons
 Periodically test local models on representative tasks. Update routing confidence.
 
 ### G14: Dynamic budget shifting
+**Status:** DONE (budget_pressure.rs, reads rate limit headers, soft pressure 50-90%+, hard block 95%+)
 Shift routing thresholds based on real-time budget consumption. More aggressive secondary routing as daily budget depletes.
