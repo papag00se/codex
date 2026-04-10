@@ -14,6 +14,7 @@ pub mod budget_pressure;
 pub mod classifier;
 pub mod classify_cache;
 pub mod codebase_context;
+pub mod compaction;
 pub mod config;
 pub mod context_strip;
 pub mod cost_analytics;

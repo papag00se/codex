@@ -213,7 +213,7 @@ pub async fn classify_request_with_context(
 }
 
 /// Strip `<think>...</think>` blocks from model output.
-fn strip_think_tags(text: &str) -> String {
+pub fn strip_think_tags(text: &str) -> String {
     let mut result = text.to_string();
     while let Some(start) = result.find("<think>") {
         if let Some(end) = result.find("</think>") {

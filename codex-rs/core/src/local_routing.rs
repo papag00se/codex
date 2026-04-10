@@ -128,23 +128,49 @@ fn is_compaction_request(prompt: &Prompt) -> bool {
 ///
 /// Called from ModelClientSession::stream() on every model API call.
 pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
-    // Compaction requests always go to the local compactor model.
-    // The proxy on port 8081 handles the actual compaction pipeline,
-    // but if the request reaches us directly, route it local.
+    // Compaction requests: run the full compaction pipeline locally.
+    // Detects <<<LOCAL_COMPACT>>> sentinel and runs normalize → chunk →
+    // extract → merge → render on local Ollama. No proxy needed.
     if is_compaction_request(prompt) {
         if let Some(state) = get_routing_state().await.as_ref() {
             if state.config.compactor.enabled {
-                info!("Compaction request detected — routing to local compactor");
+                info!("Compaction request detected — running full pipeline locally");
                 let messages = prompt_to_ollama_messages(prompt);
-                let system = extract_system_instructions(prompt);
-                if let Ok(response) = call_ollama_text(
+                let last_msg = extract_last_message(prompt);
+
+                // Strip the sentinel from the current request
+                let current_request = last_msg.replace("<<<LOCAL_COMPACT>>>", "").trim().to_string();
+
+                // Convert messages to items for the pipeline
+                let items: Vec<serde_json::Value> = messages;
+
+                let compaction_config = codex_routing::compaction::CompactionConfig::default();
+
+                match codex_routing::compaction::compact_transcript(
+                    &items,
+                    &current_request,
                     &state.pool,
                     &state.config.compactor,
-                    messages,
-                    system.as_deref(),
+                    &compaction_config,
                 ).await {
-                    state.usage.record(&response.model, response.input_tokens, response.output_tokens);
-                    return RouteResult::Local(ollama_response_to_stream(response));
+                    Ok(summary) => {
+                        info!(
+                            summary_len = summary.len(),
+                            "Compaction pipeline complete"
+                        );
+                        // Return the compacted summary as a text response
+                        let response = codex_routing::local_dispatch::OllamaTextResponse {
+                            content: summary,
+                            model: state.config.compactor.model.clone(),
+                            input_tokens: 0, // Pipeline doesn't track total
+                            output_tokens: 0,
+                        };
+                        return RouteResult::Local(ollama_response_to_stream(response));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Compaction pipeline failed, falling back to cloud");
+                        // Fall through to normal routing
+                    }
                 }
             }
         }
