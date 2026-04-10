@@ -543,6 +543,15 @@ async fn try_local_model(
     let model_name = endpoint.model.clone();
     let route_name = format!("{:?}", route);
 
+    // Estimate pre-strip tokens — what the cloud model would have received.
+    // This is the "savings" when we route locally instead.
+    let pre_strip_text: String = raw_messages.iter()
+        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let pre_strip_tokens = codex_routing::metrics::estimate_tokens(&pre_strip_text) as u64;
+    state.usage.record_savings(pre_strip_tokens);
+
     // Strip context for local models
     let strip_level = match route {
         RouteTarget::LightReasoner => codex_routing::context_strip::StripLevel::Reasoner,

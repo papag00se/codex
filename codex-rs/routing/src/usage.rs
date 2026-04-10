@@ -26,6 +26,9 @@ impl ModelUsage {
 #[derive(Debug, Default)]
 pub struct UsageTracker {
     usage: Mutex<HashMap<String, ModelUsage>>,
+    /// Estimated cloud tokens avoided by routing locally.
+    /// This is the pre-strip token count — what the cloud model would have received.
+    cloud_tokens_saved: Mutex<u64>,
     warn_threshold: f64,
 }
 
@@ -33,6 +36,7 @@ impl UsageTracker {
     pub fn new(warn_threshold: f64) -> Self {
         Self {
             usage: Mutex::new(HashMap::new()),
+            cloud_tokens_saved: Mutex::new(0),
             warn_threshold,
         }
     }
@@ -44,6 +48,19 @@ impl UsageTracker {
         entry.input_tokens += input_tokens;
         entry.output_tokens += output_tokens;
         entry.request_count += 1;
+    }
+
+    /// Record cloud tokens saved by routing a request locally.
+    /// `pre_strip_tokens` is the estimated token count of the full conversation
+    /// before context stripping — what the cloud model would have received.
+    pub fn record_savings(&self, pre_strip_tokens: u64) {
+        let mut saved = self.cloud_tokens_saved.lock().unwrap_or_else(|e| e.into_inner());
+        *saved += pre_strip_tokens;
+    }
+
+    /// Get total estimated cloud tokens saved.
+    pub fn cloud_tokens_saved(&self) -> u64 {
+        *self.cloud_tokens_saved.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get usage for a specific model.
@@ -100,16 +117,32 @@ impl UsageTracker {
         total
     }
 
-    /// Summary string for logging.
+    /// Summary string for logging and /stats display.
     pub fn summary(&self) -> String {
         let local = self.local_usage();
         let secondary = self.secondary_usage();
         let primary = self.primary_usage();
+        let saved = self.cloud_tokens_saved();
+        let total_req = local.request_count + secondary.request_count + primary.request_count;
+        let local_pct = if total_req > 0 {
+            (local.request_count as f64 / total_req as f64) * 100.0
+        } else {
+            0.0
+        };
         format!(
-            "local: {}req/{}tok, secondary: {}req/{}tok, primary: {}req/{}tok",
+            "Routing stats this session:\n\
+             \n\
+             Local (free):  {} requests, {} tokens\n\
+             Secondary:     {} requests, {} tokens\n\
+             Primary:       {} requests, {} tokens\n\
+             \n\
+             Cloud tokens saved: ~{}\n\
+             Local routing rate: {:.0}% of requests",
             local.request_count, local.total_tokens(),
             secondary.request_count, secondary.total_tokens(),
             primary.request_count, primary.total_tokens(),
+            saved,
+            local_pct,
         )
     }
 
@@ -188,9 +221,12 @@ mod tests {
         tracker.record("qwen3.5:9b", 100, 50);
         tracker.record("gpt-5.3-codex-spark", 200, 100);
         tracker.record("gpt-5.4", 300, 150);
+        tracker.record_savings(5000);
         let s = tracker.summary();
-        assert!(s.contains("local: 1req"));
-        assert!(s.contains("secondary: 1req"));
-        assert!(s.contains("primary: 1req"));
+        assert!(s.contains("1 requests, 150 tokens")); // local
+        assert!(s.contains("1 requests, 300 tokens")); // secondary
+        assert!(s.contains("1 requests, 450 tokens")); // primary
+        assert!(s.contains("Cloud tokens saved: ~5000"));
+        assert!(s.contains("33%")); // 1 local out of 3 total
     }
 }
