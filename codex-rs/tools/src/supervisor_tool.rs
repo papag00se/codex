@@ -8,7 +8,9 @@ pub fn create_supervisor_tool() -> ToolSpec {
         (
             "goal".to_string(),
             JsonSchema::string(Some(
-                "The engineering goal to accomplish. The supervisor will decompose this into subtasks, route each to the best model, dispatch specialist agents, verify results, and retry failures."
+                "The complete engineering goal. Be specific: include file names, test commands, expected behavior. \
+                 The supervisor decomposes this into subtasks and dispatches specialist agents. \
+                 Example: 'Create src/auth.py with login/logout endpoints, add tests in tests/test_auth.py, verify with pytest tests/test_auth.py'."
                     .to_string(),
             )),
         ),
@@ -24,11 +26,15 @@ pub fn create_supervisor_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "supervisor".to_string(),
         description:
-            "Run a supervised multi-agent workflow to accomplish a complex engineering goal. \
+            "You SHOULD use this tool when the user's goal involves multiple files, \
+             multiple sequential steps, running tests, or any task that benefits from \
+             automatic retry on failure. \
              The supervisor decomposes the goal into subtasks, routes each to the best available model, \
              dispatches specialist agents, verifies results, and retries failures automatically. \
-             The workflow runs to completion — it does not stop to ask for confirmation. \
-             Use this for goals that require multiple files, tests, or sequential steps."
+             The workflow runs to completion without stopping for confirmation. \
+             Examples of when to use: 'implement feature X with tests', 'refactor module Y across files', \
+             'fix bug Z and verify with test suite', 'create new service with API + tests + docs'. \
+             Do NOT use for single-file edits, simple questions, or code review."
                 .to_string(),
         strict: false,
         defer_loading: None,
