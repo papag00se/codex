@@ -85,22 +85,16 @@ Usage tracker resets every session. No persistent view of where tokens are going
 **What's needed:** Persist usage data to `.codex-multi/usage_history.jsonl`. CLI command or summary at session end.
 
 ### G15: Failover executor wiring
-**Status:** IN PROGRESS — executor built (`failover.rs`, 15 tests), not yet wired into request flow  
+**Status:** DONE (wired into `local_routing.rs` and `client.rs`)  
 **Impact:** Medium — failures fall back to `RouteResult::Default` instead of walking configured chains
 
-The failover executor (`classify_failure()` + `decide_action()`) is complete and tested. It classifies HTTP errors into F1-F8 failure types and decides retry-same vs walk-chain vs hard-fail. But it's not yet called from:
-- `local_routing.rs`: quality failures should walk the failover chain instead of falling back to default cloud
-- `client.rs`: cloud HTTP errors (429, 503, etc.) should classify and walk the chain
-
-**What's needed:** Wire `failover::classify_failure()` and `failover::decide_action()` into the error handling paths in `local_routing.rs` and `client.rs`. On `RetrySame`, wait and retry. On `NextInChain`, override model and retry. On `HardFail`/`ChainExhausted`, surface the error.
+Local model failures (connection, quality, timeout) now walk the configured failover chain via `failover::decide_action()`. Cloud HTTP errors (429, 503, etc.) are classified and the chain is walked with retry. `CloudOverride` carries `CloudFailoverCtx` so `stream()` can retry with the next model.
 
 ### G16: Local coder multi-turn tool reliability
-**Status:** NOT STARTED  
+**Status:** DONE (sticky routing in `local_routing.rs`)  
 **Impact:** Medium — simple tool calls work, complex multi-step tasks through local coder are unreliable
 
-Local coder can make single tool calls (read file, run command), but multi-turn tool loops (call → execute → feed result → call again) sometimes get stuck or produce malformed tool calls on the second turn.
-
-**What's needed:** Investigation into whether this is a prompt issue, tool format issue, or model limitation. May need turn-by-turn scaffolding for local tool loops.
+Root cause: each turn was re-classified by the LLM classifier, which could reroute mid-tool-loop to a different model. Fixed by detecting pending local coder tool loops (`local_call_*`/`local_fc_*` IDs in conversation) and skipping classification — staying on the same local coder until the loop completes.
 
 ## Future possibilities
 

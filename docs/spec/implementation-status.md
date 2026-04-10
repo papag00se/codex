@@ -159,9 +159,9 @@ Result: ✓ 12 parametrized pytest tests passing
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Wire failover executor into request flow | Not wired — executor built but not called on errors |
-| 2 | Local coder multi-turn tool loop reliability | Simple calls work, complex multi-step unreliable |
-| 3 | Supervisor tool model guidance | Model doesn't always choose supervisor for complex goals |
+| 1 | Wire failover executor into request flow | DONE — local + cloud paths walk failover chains |
+| 2 | Local coder multi-turn tool loop reliability | DONE — sticky routing prevents mid-loop rerouting |
+| 3 | Supervisor tool model guidance | DONE — directive description with examples |
 | 4 | Observability — routing decisions in TUI | Logged via tracing only |
 
 ## Build instructions
@@ -188,12 +188,14 @@ RUST_LOG=codex_core::local_routing=info,codex_routing=info ./target/debug/codex
 ## Git log (recent)
 
 ```
+7300c0ff6 Strengthen supervisor tool description — directive language, examples
+d2d75081a Sticky routing for local coder tool loops — prevent mid-loop rerouting
+4a5928084 Wire failover executor into request flow — local and cloud paths
 a31832961 Failover executor — classifies failures F1-F8, decides retry vs chain-walk
 4e19e0f9a Failover behavior config — retry, rate limit, timeout parameters
 9f6248099 Full compaction pipeline in Rust — no proxy needed
 38f855d3b Expanded smoke test: 15 checks for routing, stripping, compaction
 0ab00c723 Context stripping for local models — fit conversations in 8K context
-57dd5e69b Smoke test + local coder tool support
 069cb503d G14: Dynamic budget pressure — routing shifts based on rate limit data
 ea4ac2ff9 G3,G4,G8,G9: Cross-session memory, prompt adaptation, classifier cache, cost analytics
 df641074d G5: Streaming from local Ollama models

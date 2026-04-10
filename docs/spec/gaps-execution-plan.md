@@ -28,20 +28,12 @@ Additionally built (not in original gap list):
 
 ## In progress
 
-### G15: Wire failover executor into request flow
-The executor is built and tested (15 tests). Next: call it from error handling paths.
+No items currently in progress. All identified gaps are resolved.
 
-**Steps:**
-- In `local_routing.rs`: on quality failure, call `failover::decide_action()` with `QualityFailure` to walk chain
-- In `client.rs`: on HTTP errors (429, 503, etc.), classify with `failover::classify_failure()`, execute the action
-- On `RetrySame`: wait and retry same model
-- On `NextInChain`: override model slug and retry
-- On `HardFail`/`ChainExhausted`: surface error to user
+## Recently completed
+
+### G15: Wire failover executor into request flow
+DONE. Local model failures walk the failover chain. Cloud HTTP errors classified and chain walked. `CloudOverride` carries failover context for retry loop in `client.rs`.
 
 ### G16: Local coder multi-turn tool reliability
-Simple tool calls work. Complex multi-step sequences unreliable.
-
-**Steps:**
-- Investigate root cause (prompt? format? model limitation?)
-- May need per-turn scaffolding for local tool loops
-- Consider streaming tool calls for better error recovery
+DONE. Root cause was re-classification mid-tool-loop. Fixed with sticky routing: `has_pending_local_tool_loop()` detects local coder tool calls in conversation history and skips classifier.
