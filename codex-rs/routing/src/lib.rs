@@ -15,6 +15,7 @@ pub mod classifier;
 pub mod classify_cache;
 pub mod codebase_context;
 pub mod config;
+pub mod context_strip;
 pub mod cost_analytics;
 pub mod engine;
 pub mod feedback;

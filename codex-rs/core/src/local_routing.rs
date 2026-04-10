@@ -271,10 +271,25 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
                 "Routing to local model (free)"
             );
 
-            let messages = prompt_to_ollama_messages(prompt);
-            let system = extract_system_instructions(prompt);
+            let raw_messages = prompt_to_ollama_messages(prompt);
+            let raw_system = extract_system_instructions(prompt);
             let model_name = endpoint.model.clone();
             let route_name = format!("{:?}", classification.route);
+
+            // Strip context for local models — remove binary, truncate,
+            // collapse polls, keep only recent turns.
+            let strip_level = match route {
+                RouteTarget::LightReasoner => codex_routing::context_strip::StripLevel::Reasoner,
+                _ => codex_routing::context_strip::StripLevel::Coder,
+            };
+            let stripped = codex_routing::context_strip::strip_context(
+                &raw_messages,
+                raw_system.as_deref(),
+                strip_level,
+            );
+            info!(strip_summary = %stripped.strip_summary, "Context stripped for local model");
+            let messages = stripped.messages;
+            let system = stripped.system;
 
             // For LightCoder: pass ESSENTIAL tools only (shell, file ops).
             // Not all 97 tools — that would fill the entire context window.
