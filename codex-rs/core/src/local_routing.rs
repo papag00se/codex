@@ -29,6 +29,7 @@ struct RoutingState {
     usage: codex_routing::usage::UsageTracker,
     feedback: std::sync::Mutex<codex_routing::feedback::FeedbackStore>,
     codebase_context: codex_routing::codebase_context::CodebaseContext,
+    classify_cache: std::sync::Mutex<codex_routing::classify_cache::ClassifyCache>,
 }
 
 /// Initialize the global routing state.
@@ -71,7 +72,10 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
                     codex_routing::feedback::FeedbackStore::new(&cwd),
                 );
                 let codebase_context = codex_routing::codebase_context::CodebaseContext::detect(&cwd);
-                Some(RoutingState { config, project_config, pool, usage, feedback, codebase_context })
+                let classify_cache = std::sync::Mutex::new(
+                    codex_routing::classify_cache::ClassifyCache::new(),
+                );
+                Some(RoutingState { config, project_config, pool, usage, feedback, codebase_context, classify_cache })
             } else {
                 info!("Per-request routing disabled — classifier LLM not reachable, all requests go to cloud");
                 None
@@ -157,26 +161,49 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
     // Count recent tool calls from conversation history
     let (tool_call_count, turn_count) = count_recent_activity(prompt);
 
-    // Get routing profiles and codebase context for smarter classification
-    let routing_profile = state.feedback
+    // G8: Check classifier cache — skip the 3-4s LLM call if confident
+    let cached_classification = state.classify_cache
         .lock()
-        .map(|f| f.profile_context())
-        .unwrap_or_default();
-    let codebase_ctx = state.codebase_context.classifier_context();
+        .ok()
+        .and_then(|cache| cache.try_cached());
 
-    // Ask the classifier LLM where this request should go,
-    // with routing history and codebase context.
-    let classification = codex_routing::classifier::classify_request_with_context(
-        &prompt_text,
-        &tool_names,
-        tool_call_count,
-        turn_count,
-        &state.config,
-        &state.pool,
-        &routing_profile,
-        &codebase_ctx,
-    )
-    .await;
+    if let Some(ref cached) = cached_classification {
+        info!(
+            route = ?cached.route,
+            reason = %cached.reason,
+            "Using cached classification (skipping classifier LLM)"
+        );
+    }
+
+    // Use cached classification if available, otherwise call the classifier LLM
+    let classification = if let Some(cached) = cached_classification {
+        cached
+    } else {
+        let routing_profile = state.feedback
+            .lock()
+            .map(|f| f.profile_context())
+            .unwrap_or_default();
+        let codebase_ctx = state.codebase_context.classifier_context();
+
+        let result = codex_routing::classifier::classify_request_with_context(
+            &prompt_text,
+            &tool_names,
+            tool_call_count,
+            turn_count,
+            &state.config,
+            &state.pool,
+            &routing_profile,
+            &codebase_ctx,
+        )
+        .await;
+
+        // Record in cache for future requests
+        if let Ok(mut cache) = state.classify_cache.lock() {
+            cache.record(&result);
+        }
+
+        result
+    };
 
     match classification.route {
         // --- Local routes: call Ollama directly ---
