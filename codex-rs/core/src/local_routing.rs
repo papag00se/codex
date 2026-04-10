@@ -12,7 +12,8 @@ use codex_api::ResponseEvent;
 use codex_protocol::models::{ContentItem, ResponseItem};
 use codex_protocol::protocol::TokenUsage;
 use codex_routing::classifier::{classify_request, RouteTarget};
-use codex_routing::config::RoutingConfig;
+use codex_routing::config::{OllamaEndpoint, RoutingConfig};
+use codex_routing::failover::{self, FailoverAction, FailureType};
 use codex_routing::local_dispatch::{call_ollama_text, OllamaTextResponse};
 use codex_routing::OllamaClientPool;
 use std::sync::Arc;
@@ -113,9 +114,93 @@ pub(crate) enum RouteResult {
     Local(ResponseStream),
     /// Request should go to cloud, but with this model override.
     /// The slug replaces model_info.slug for this request only.
-    CloudOverride(String),
+    /// Carries failover chain context so cloud errors can walk the chain.
+    CloudOverride {
+        slug: String,
+        failover_ctx: Option<CloudFailoverCtx>,
+    },
     /// No routing — use the default cloud model.
     Default,
+}
+
+/// Cloud failover context — passed to stream() so it can retry on HTTP errors.
+#[derive(Clone)]
+pub(crate) struct CloudFailoverCtx {
+    pub role_name: String,
+    pub chain_name: String,
+    pub chain: Vec<String>,
+    pub behavior: codex_routing::project_config::FailoverBehavior,
+}
+
+/// What a role name resolves to — either a local Ollama endpoint or a cloud model slug.
+enum ResolvedRole {
+    Local(OllamaEndpoint),
+    Cloud(String), // model slug
+}
+
+/// Map a classifier route to the failover chain name.
+fn chain_name_for_route(route: &RouteTarget) -> &'static str {
+    match route {
+        RouteTarget::LightReasoner => "reasoning",
+        RouteTarget::LightCoder => "coding",
+        RouteTarget::CloudFast | RouteTarget::CloudMini => "coding",
+        RouteTarget::CloudReasoner => "reasoning",
+        RouteTarget::CloudCoder => "coding",
+    }
+}
+
+/// Map a classifier route to its role name in the failover chain.
+fn role_name_for_route(route: &RouteTarget) -> &'static str {
+    match route {
+        RouteTarget::LightReasoner => "light_reasoner",
+        RouteTarget::LightCoder => "light_coder",
+        RouteTarget::CloudFast => "cloud_fast",
+        RouteTarget::CloudMini => "cloud_mini",
+        RouteTarget::CloudReasoner => "cloud_reasoner",
+        RouteTarget::CloudCoder => "cloud_coder",
+    }
+}
+
+/// Resolve a role name from the failover chain to a concrete endpoint or cloud slug.
+fn resolve_role(role_name: &str, state: &RoutingState) -> Option<ResolvedRole> {
+    match role_name {
+        "light_reasoner" => {
+            if state.config.reasoner.enabled {
+                Some(ResolvedRole::Local(state.config.reasoner.clone()))
+            } else {
+                None
+            }
+        }
+        "light_reasoner_backup" => {
+            if state.config.reasoner_backup.enabled {
+                Some(ResolvedRole::Local(state.config.reasoner_backup.clone()))
+            } else {
+                None
+            }
+        }
+        "light_coder" => {
+            if state.config.light_coder.enabled {
+                Some(ResolvedRole::Local(state.config.light_coder.clone()))
+            } else {
+                None
+            }
+        }
+        "compactor" => {
+            if state.config.compactor.enabled {
+                Some(ResolvedRole::Local(state.config.compactor.clone()))
+            } else {
+                None
+            }
+        }
+        // Cloud roles — resolve to model slug via weighted selection
+        "cloud_fast" | "cloud_mini" | "cloud_reasoner" | "cloud_coder" => {
+            pick_cloud_model(&state.project_config, role_name)
+                .map(ResolvedRole::Cloud)
+        }
+        // Classifier itself — not a useful failover target
+        "classifier" => None,
+        _ => None,
+    }
 }
 
 /// Check if a prompt contains the compaction sentinel.
@@ -262,287 +347,332 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
         classification.route
     };
 
-    match route {
-        // --- Local routes: call Ollama directly ---
-        RouteTarget::LightReasoner | RouteTarget::LightCoder => {
-            let endpoint = match classification.route {
-                RouteTarget::LightReasoner => {
-                    if state.config.reasoner.enabled {
-                        Some(&state.config.reasoner)
-                    } else if state.config.reasoner_backup.enabled {
-                        Some(&state.config.reasoner_backup)
-                    } else {
-                        None
-                    }
-                }
-                RouteTarget::LightCoder => {
-                    if state.config.light_coder.enabled {
-                        Some(&state.config.light_coder)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
+    // --- Determine the failover chain for this route ---
+    let chain_name = chain_name_for_route(&route);
+    let initial_role = role_name_for_route(&route);
+    let chain = state.project_config.failover_chain(chain_name).to_vec();
+    let behavior = &state.project_config.failover.behavior;
 
-            let Some(endpoint) = endpoint else {
-                return RouteResult::Default;
-            };
+    // Walk the failover chain starting from the classified route.
+    let mut current_role = initial_role.to_string();
+    let mut attempt: u32 = 0;
 
-            info!(
-                model = %endpoint.model,
-                route = ?classification.route,
-                tools_potential = classification.tools_potential,
-                reason = %classification.reason,
-                "Routing to local model (free)"
-            );
+    loop {
+        // Resolve the current role to a concrete endpoint or cloud slug
+        let resolved = resolve_role(&current_role, state);
 
-            let raw_messages = prompt_to_ollama_messages(prompt);
-            let raw_system = extract_system_instructions(prompt);
-            let model_name = endpoint.model.clone();
-            let route_name = format!("{:?}", classification.route);
-
-            // Strip context for local models — remove binary, truncate,
-            // collapse polls, keep only recent turns.
-            let strip_level = match route {
-                RouteTarget::LightReasoner => codex_routing::context_strip::StripLevel::Reasoner,
-                _ => codex_routing::context_strip::StripLevel::Coder,
-            };
-            let stripped = codex_routing::context_strip::strip_context(
-                &raw_messages,
-                raw_system.as_deref(),
-                strip_level,
-            );
-            info!(strip_summary = %stripped.strip_summary, "Context stripped for local model");
-            let messages = stripped.messages;
-            let system = stripped.system;
-
-            // For LightCoder: pass ESSENTIAL tools only (shell, file ops).
-            // Not all 97 tools — that would fill the entire context window.
-            // For LightReasoner: no tools (saves context).
-            let use_tools = route == RouteTarget::LightCoder && classification.tools_potential;
-            if use_tools {
-                // Only pass tools the local model can usefully call
-                let essential_tools = ["shell", "local_shell", "apply_patch",
-                    "read_file", "list_dir", "text_editor"];
-                let tool_json: Vec<serde_json::Value> = prompt.tools.iter()
-                    .filter(|t| essential_tools.contains(&t.name()))
-                    .filter_map(|t| serde_json::to_value(t).ok())
-                    .collect();
-                let ollama_tools = codex_routing::tool_format::to_ollama_tools(&tool_json);
-
+        match resolved {
+            Some(ResolvedRole::Cloud(slug)) => {
                 info!(
-                    tool_count = ollama_tools.len(),
-                    "Passing tools to local coder"
+                    route = %current_role,
+                    model = %slug,
+                    reason = %classification.reason,
+                    "Routing to cloud model (override)"
                 );
-
-                // Use non-streaming path with tools for now
-                // (streaming + tools is complex — the model may emit tool calls mid-stream)
-                let result = state.pool.chat_with_tools(
-                    &endpoint.base_url,
-                    &endpoint.model,
-                    messages.clone(),
-                    system.as_deref(),
-                    endpoint.temperature,
-                    endpoint.num_ctx,
-                    None,
-                    endpoint.timeout_seconds,
-                    Some(ollama_tools),
+                return RouteResult::CloudOverride {
+                    slug,
+                    failover_ctx: Some(CloudFailoverCtx {
+                        role_name: current_role.clone(),
+                        chain_name: chain_name.to_string(),
+                        chain: chain.clone(),
+                        behavior: behavior.clone(),
+                    }),
+                };
+            }
+            Some(ResolvedRole::Local(endpoint)) => {
+                // Try this local model
+                let result = try_local_model(
+                    prompt,
+                    &endpoint,
+                    &route,
+                    &classification,
+                    state,
                 ).await;
 
-                if let Some(body) = result {
-                    let message = body.get("message").cloned().unwrap_or_default();
-                    let content = message.get("content")
-                        .and_then(|c| c.as_str()).unwrap_or("").to_string();
-                    let native_tool_calls = message.get("tool_calls")
-                        .and_then(|tc| tc.as_array()).cloned().unwrap_or_default();
-                    let input_tokens = body.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let output_tokens = body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                match result {
+                    Ok(stream) => return RouteResult::Local(stream),
+                    Err(failure_type) => {
+                        // Local model failed — consult the failover executor
+                        let action = failover::decide_action(
+                            failure_type,
+                            &current_role,
+                            chain_name,
+                            &chain,
+                            attempt,
+                            None, // no retry-after for local models
+                            behavior,
+                        );
 
-                    info!(
-                        content_len = content.len(),
-                        native_tool_calls = native_tool_calls.len(),
-                        "Local coder response received"
-                    );
-
-                    // Build response — handle both native tool_calls and embedded ones
-                    return RouteResult::Local(ollama_tool_response_to_stream(
-                        content,
-                        native_tool_calls,
-                        model_name.clone(),
-                        input_tokens,
-                        output_tokens,
-                    ));
-                } else {
-                    warn!("Local coder with tools failed, falling back to cloud");
-                    return RouteResult::Default;
+                        match action {
+                            FailoverAction::RetrySame { wait, attempt: next_attempt } => {
+                                info!(
+                                    model = %current_role,
+                                    wait_ms = wait.as_millis() as u64,
+                                    attempt = next_attempt,
+                                    "Failover: retrying same local model"
+                                );
+                                tokio::time::sleep(wait).await;
+                                attempt = next_attempt;
+                                continue;
+                            }
+                            FailoverAction::NextInChain { model_role, reason } => {
+                                info!(
+                                    from = %current_role,
+                                    to = %model_role,
+                                    reason = %reason,
+                                    "Failover: walking to next model in chain"
+                                );
+                                current_role = model_role;
+                                attempt = 0;
+                                continue;
+                            }
+                            FailoverAction::HardFail { reason } => {
+                                warn!(reason = %reason, "Failover: hard fail");
+                                return RouteResult::Default;
+                            }
+                            FailoverAction::ChainExhausted { chain_name } => {
+                                warn!(chain = %chain_name, "Failover: chain exhausted, using default");
+                                return RouteResult::Default;
+                            }
+                        }
+                    }
                 }
             }
-
-            // G5: Try streaming from local model (no tools — reasoner path)
-            let stream_rx = state.pool.chat_stream(
-                &endpoint.base_url,
-                &endpoint.model,
-                messages,
-                system.as_deref(),
-                endpoint.temperature,
-                endpoint.num_ctx,
-                endpoint.timeout_seconds,
-            ).await;
-
-            let Some(mut ollama_rx) = stream_rx else {
-                warn!("Local model stream failed to start, falling back to cloud");
-                return RouteResult::Default;
-            };
-
-            // Build the ResponseEvent stream with real-time deltas
-            let prompt_text_owned = prompt_text.clone();
-            let feedback = state.feedback.lock().ok().map(|_| ());  // Just check lock works
-            let _ = feedback;
-
-            // We need references to state in the spawn — clone what we need
-            let usage_ref = &state.usage;
-            let feedback_mutex = &state.feedback;
-
-            // Can't move references into spawn — use a different approach.
-            // Collect feedback data and record after the stream.
-            let started = std::time::Instant::now();
-
-            let (event_tx, event_rx) = mpsc::channel(64);
-            let model_for_task = model_name.clone();
-            let route_for_task = route_name.clone();
-
-            tokio::spawn(async move {
-                // Send Created + OutputItemAdded first
-                let _ = event_tx.send(Ok(ResponseEvent::Created)).await;
-
-                let placeholder = ResponseItem::Message {
-                    id: Some("local_msg_0".to_string()),
-                    role: "assistant".to_string(),
-                    content: vec![ContentItem::OutputText { text: String::new() }],
-                    end_turn: None,
-                    phase: None,
-                };
-                let _ = event_tx.send(Ok(ResponseEvent::OutputItemAdded(placeholder))).await;
-
-                let mut full_text = String::new();
-                let mut input_tokens = 0u64;
-                let mut output_tokens = 0u64;
-
-                while let Some(chunk) = ollama_rx.recv().await {
-                    match chunk {
-                        codex_routing::ollama::StreamChunk::Delta(text) => {
-                            full_text.push_str(&text);
-                            let _ = event_tx.send(Ok(ResponseEvent::OutputTextDelta(text))).await;
-                        }
-                        codex_routing::ollama::StreamChunk::Done { input_tokens: it, output_tokens: ot } => {
-                            input_tokens = it;
-                            output_tokens = ot;
-                            break;
-                        }
+            None => {
+                // Role can't be resolved (disabled, no config, etc.)
+                // Walk to next in chain
+                let action = failover::decide_action(
+                    FailureType::ModelNotFound,
+                    &current_role,
+                    chain_name,
+                    &chain,
+                    0,
+                    None,
+                    behavior,
+                );
+                match action {
+                    FailoverAction::NextInChain { model_role, reason } => {
+                        info!(
+                            from = %current_role,
+                            to = %model_role,
+                            reason = %reason,
+                            "Failover: role unresolvable, walking chain"
+                        );
+                        current_role = model_role;
+                        attempt = 0;
+                        continue;
                     }
-                }
-
-                // Check for tool calls in the response (local coder may emit them)
-                let recovered = codex_routing::tool_recovery::recover_tool_calls(&full_text, false);
-
-                if recovered.tool_calls.is_empty() {
-                    // Pure text response — send as message
-                    let final_message = ResponseItem::Message {
-                        id: Some("local_msg_0".to_string()),
-                        role: "assistant".to_string(),
-                        content: vec![ContentItem::OutputText { text: full_text }],
-                        end_turn: Some(true),
-                        phase: None,
-                    };
-                    let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(final_message))).await;
-                } else {
-                    // Has tool calls — send text message then function calls
-                    if !recovered.content.is_empty() {
-                        let text_message = ResponseItem::Message {
-                            id: Some("local_msg_0".to_string()),
-                            role: "assistant".to_string(),
-                            content: vec![ContentItem::OutputText { text: recovered.content }],
-                            end_turn: None,
-                            phase: None,
-                        };
-                        let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(text_message))).await;
+                    _ => {
+                        return RouteResult::Default;
                     }
-
-                    // Emit each tool call as a FunctionCall item
-                    for (i, tc) in recovered.tool_calls.iter().enumerate() {
-                        let call_id = tc.id.clone()
-                            .unwrap_or_else(|| format!("local_call_{i}"));
-                        let arguments = serde_json::to_string(&tc.arguments)
-                            .unwrap_or_else(|_| "{}".into());
-
-                        let func_call = ResponseItem::FunctionCall {
-                            id: Some(format!("local_fc_{i}")),
-                            name: tc.name.clone(),
-                            namespace: None,
-                            arguments,
-                            call_id,
-                        };
-                        let _ = event_tx.send(Ok(ResponseEvent::OutputItemAdded(func_call.clone()))).await;
-                        let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(func_call))).await;
-                    }
-                }
-
-                let _ = event_tx.send(Ok(ResponseEvent::Completed {
-                    response_id: "local_response".to_string(),
-                    token_usage: Some(TokenUsage {
-                        input_tokens: input_tokens as i64,
-                        output_tokens: output_tokens as i64,
-                        ..Default::default()
-                    }),
-                })).await;
-            });
-
-            info!(
-                model = %model_name,
-                route = %route_name,
-                "Streaming from local model (free)"
-            );
-
-            RouteResult::Local(ResponseStream { rx_event: event_rx })
-        }
-
-        // --- Cloud routes: pick model from config (with weighted distribution) ---
-        RouteTarget::CloudFast
-        | RouteTarget::CloudMini
-        | RouteTarget::CloudReasoner
-        | RouteTarget::CloudCoder => {
-            let role_name = match classification.route {
-                RouteTarget::CloudFast => "cloud_fast",
-                RouteTarget::CloudMini => "cloud_mini",
-                RouteTarget::CloudReasoner => "cloud_reasoner",
-                RouteTarget::CloudCoder => "cloud_coder",
-                _ => unreachable!(),
-            };
-
-            let model_slug = pick_cloud_model(&state.project_config, role_name);
-
-            match model_slug {
-                Some(slug) => {
-                    info!(
-                        route = role_name,
-                        model = %slug,
-                        reason = %classification.reason,
-                        "Routing to cloud model (override)"
-                    );
-                    RouteResult::CloudOverride(slug)
-                }
-                None => {
-                    info!(
-                        route = role_name,
-                        reason = %classification.reason,
-                        "No config for cloud route, using default model"
-                    );
-                    RouteResult::Default
                 }
             }
         }
     }
+}
+
+/// Try executing a request on a local Ollama model.
+/// Returns Ok(ResponseStream) on success, Err(FailureType) on failure.
+async fn try_local_model(
+    prompt: &Prompt,
+    endpoint: &OllamaEndpoint,
+    route: &RouteTarget,
+    classification: &codex_routing::classifier::ClassifyResult,
+    state: &RoutingState,
+) -> Result<ResponseStream, FailureType> {
+    let prompt_text = extract_last_message(prompt);
+
+    info!(
+        model = %endpoint.model,
+        route = ?route,
+        tools_potential = classification.tools_potential,
+        reason = %classification.reason,
+        "Routing to local model (free)"
+    );
+
+    let raw_messages = prompt_to_ollama_messages(prompt);
+    let raw_system = extract_system_instructions(prompt);
+    let model_name = endpoint.model.clone();
+    let route_name = format!("{:?}", route);
+
+    // Strip context for local models
+    let strip_level = match route {
+        RouteTarget::LightReasoner => codex_routing::context_strip::StripLevel::Reasoner,
+        _ => codex_routing::context_strip::StripLevel::Coder,
+    };
+    let stripped = codex_routing::context_strip::strip_context(
+        &raw_messages,
+        raw_system.as_deref(),
+        strip_level,
+    );
+    info!(strip_summary = %stripped.strip_summary, "Context stripped for local model");
+    let messages = stripped.messages;
+    let system = stripped.system;
+
+    // For LightCoder: pass ESSENTIAL tools only (shell, file ops).
+    let use_tools = *route == RouteTarget::LightCoder && classification.tools_potential;
+    if use_tools {
+        let essential_tools = ["shell", "local_shell", "apply_patch",
+            "read_file", "list_dir", "text_editor"];
+        let tool_json: Vec<serde_json::Value> = prompt.tools.iter()
+            .filter(|t| essential_tools.contains(&t.name()))
+            .filter_map(|t| serde_json::to_value(t).ok())
+            .collect();
+        let ollama_tools = codex_routing::tool_format::to_ollama_tools(&tool_json);
+
+        info!(
+            tool_count = ollama_tools.len(),
+            "Passing tools to local coder"
+        );
+
+        let result = state.pool.chat_with_tools(
+            &endpoint.base_url,
+            &endpoint.model,
+            messages.clone(),
+            system.as_deref(),
+            endpoint.temperature,
+            endpoint.num_ctx,
+            None,
+            endpoint.timeout_seconds,
+            Some(ollama_tools),
+        ).await;
+
+        if let Some(body) = result {
+            let message = body.get("message").cloned().unwrap_or_default();
+            let content = message.get("content")
+                .and_then(|c| c.as_str()).unwrap_or("").to_string();
+            let native_tool_calls = message.get("tool_calls")
+                .and_then(|tc| tc.as_array()).cloned().unwrap_or_default();
+            let input_tokens = body.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let output_tokens = body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            info!(
+                content_len = content.len(),
+                native_tool_calls = native_tool_calls.len(),
+                "Local coder response received"
+            );
+
+            return Ok(ollama_tool_response_to_stream(
+                content,
+                native_tool_calls,
+                model_name.clone(),
+                input_tokens,
+                output_tokens,
+            ));
+        } else {
+            warn!("Local coder with tools failed");
+            return Err(FailureType::ModelUnavailable);
+        }
+    }
+
+    // Streaming path (no tools — reasoner)
+    let stream_rx = state.pool.chat_stream(
+        &endpoint.base_url,
+        &endpoint.model,
+        messages,
+        system.as_deref(),
+        endpoint.temperature,
+        endpoint.num_ctx,
+        endpoint.timeout_seconds,
+    ).await;
+
+    let Some(mut ollama_rx) = stream_rx else {
+        warn!("Local model stream failed to start");
+        return Err(FailureType::ModelUnavailable);
+    };
+
+    let (event_tx, event_rx) = mpsc::channel(64);
+    let model_for_task = model_name.clone();
+    let route_for_task = route_name.clone();
+
+    tokio::spawn(async move {
+        let _ = event_tx.send(Ok(ResponseEvent::Created)).await;
+
+        let placeholder = ResponseItem::Message {
+            id: Some("local_msg_0".to_string()),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText { text: String::new() }],
+            end_turn: None,
+            phase: None,
+        };
+        let _ = event_tx.send(Ok(ResponseEvent::OutputItemAdded(placeholder))).await;
+
+        let mut full_text = String::new();
+        let mut input_tokens = 0u64;
+        let mut output_tokens = 0u64;
+
+        while let Some(chunk) = ollama_rx.recv().await {
+            match chunk {
+                codex_routing::ollama::StreamChunk::Delta(text) => {
+                    full_text.push_str(&text);
+                    let _ = event_tx.send(Ok(ResponseEvent::OutputTextDelta(text))).await;
+                }
+                codex_routing::ollama::StreamChunk::Done { input_tokens: it, output_tokens: ot } => {
+                    input_tokens = it;
+                    output_tokens = ot;
+                    break;
+                }
+            }
+        }
+
+        let recovered = codex_routing::tool_recovery::recover_tool_calls(&full_text, false);
+
+        if recovered.tool_calls.is_empty() {
+            let final_message = ResponseItem::Message {
+                id: Some("local_msg_0".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText { text: full_text }],
+                end_turn: Some(true),
+                phase: None,
+            };
+            let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(final_message))).await;
+        } else {
+            if !recovered.content.is_empty() {
+                let text_message = ResponseItem::Message {
+                    id: Some("local_msg_0".to_string()),
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText { text: recovered.content }],
+                    end_turn: None,
+                    phase: None,
+                };
+                let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(text_message))).await;
+            }
+
+            for (i, tc) in recovered.tool_calls.iter().enumerate() {
+                let call_id = tc.id.clone()
+                    .unwrap_or_else(|| format!("local_call_{i}"));
+                let arguments = serde_json::to_string(&tc.arguments)
+                    .unwrap_or_else(|_| "{}".into());
+
+                let func_call = ResponseItem::FunctionCall {
+                    id: Some(format!("local_fc_{i}")),
+                    name: tc.name.clone(),
+                    namespace: None,
+                    arguments,
+                    call_id,
+                };
+                let _ = event_tx.send(Ok(ResponseEvent::OutputItemAdded(func_call.clone()))).await;
+                let _ = event_tx.send(Ok(ResponseEvent::OutputItemDone(func_call))).await;
+            }
+        }
+
+        let _ = event_tx.send(Ok(ResponseEvent::Completed {
+            response_id: "local_response".to_string(),
+            token_usage: Some(TokenUsage {
+                input_tokens: input_tokens as i64,
+                output_tokens: output_tokens as i64,
+                ..Default::default()
+            }),
+        })).await;
+    });
+
+    info!(
+        model = %model_name,
+        route = %route_name,
+        "Streaming from local model (free)"
+    );
+
+    Ok(ResponseStream { rx_event: event_rx })
 }
 
 /// Pick a cloud model from the project config's weighted entries for a role.
@@ -574,6 +704,76 @@ fn pick_cloud_model(
             }
             // Shouldn't reach here, but fallback to first
             Some(entries[0].model.clone())
+        }
+    }
+}
+
+/// Handle a cloud API error by consulting the failover executor.
+/// Returns Some(new_slug) if we should retry with a different model,
+/// or None if we should propagate the error.
+///
+/// Called from client.rs when a cloud request fails with an HTTP error.
+pub(crate) async fn handle_cloud_failover(
+    ctx: &mut CloudFailoverCtx,
+    status_code: Option<u16>,
+    error_message: &str,
+    attempt: &mut u32,
+    retry_after_ms: Option<u64>,
+) -> Option<String> {
+    let failure_type = failover::classify_failure(
+        status_code,
+        error_message,
+        false, // not a quality failure (we don't check cloud response quality)
+        false, // not context overflow (would need specific detection)
+    );
+
+    let action = failover::decide_action(
+        failure_type,
+        &ctx.role_name,
+        &ctx.chain_name,
+        &ctx.chain,
+        *attempt,
+        retry_after_ms,
+        &ctx.behavior,
+    );
+
+    match action {
+        FailoverAction::RetrySame { wait, attempt: next_attempt } => {
+            info!(
+                model = %ctx.role_name,
+                wait_ms = wait.as_millis() as u64,
+                attempt = next_attempt,
+                "Cloud failover: retrying same model"
+            );
+            tokio::time::sleep(wait).await;
+            *attempt = next_attempt;
+            // Return the same slug — caller should retry the request
+            let state = get_routing_state().await.as_ref()?;
+            pick_cloud_model(&state.project_config, &ctx.role_name)
+        }
+        FailoverAction::NextInChain { model_role, reason } => {
+            info!(
+                from = %ctx.role_name,
+                to = %model_role,
+                reason = %reason,
+                "Cloud failover: walking to next model in chain"
+            );
+            // Update context for potential future failures
+            ctx.role_name = model_role.clone();
+            *attempt = 0;
+
+            // Resolve the next role — only cloud models (local would need
+            // a full re-route which we don't do from the cloud path)
+            let state = get_routing_state().await.as_ref()?;
+            pick_cloud_model(&state.project_config, &model_role)
+        }
+        FailoverAction::HardFail { reason } => {
+            warn!(reason = %reason, "Cloud failover: hard fail");
+            None
+        }
+        FailoverAction::ChainExhausted { chain_name } => {
+            warn!(chain = %chain_name, "Cloud failover: chain exhausted");
+            None
         }
     }
 }

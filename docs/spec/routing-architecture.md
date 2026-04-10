@@ -2,7 +2,7 @@
 
 [< Spec Index](index.md) | [Product Index](../product/index.md)
 
-> **Known gaps:** Routing currently has no feedback loop (same decisions regardless of outcomes), no codebase awareness (classifier doesn't know project complexity), and classifier adds 3-4s latency per request. See [Gaps](gaps.md) G1, G2, G8.
+> **Resolved:** G1 (routing feedback loop), G2 (codebase awareness), G8 (classifier latency) are all implemented. See [Gaps](gaps.md) for remaining items and [Implementation Status](implementation-status.md) for current state.
 
 ## Why routing exists
 

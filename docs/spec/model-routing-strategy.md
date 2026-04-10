@@ -2,7 +2,7 @@
 
 [< Spec Index](index.md) | [Design Principles](design-principles.md)
 
-> **Known gaps:** No learned routing profiles (G1), no codebase context in decisions (G2), no warm-model preference for shared GPUs (G6), no per-request quality detection (G7). See [Gaps](gaps.md).
+> **Resolved:** G1 (routing feedback), G2 (codebase context), G6 (warm model preference), G7 (quality detection) are all implemented. See [Gaps](gaps.md) for remaining items.
 
 ## Available infrastructure
 
@@ -48,50 +48,39 @@ The routing decision follows this priority: **free → secondary bucket → prim
 
 ## Failover chains
 
-Each task type has a deterministic failover chain. If the first model fails (timeout, error, unavailable), try the next. No LLM decides failover — the code does.
+Each task type has a deterministic failover chain configured in `.codex-multi/config.toml`. If the first model fails (timeout, error, quality failure, unavailable), the failover executor (`failover.rs`) walks the chain. No LLM decides failover — deterministic code does.
+
+Failure types (F1-F8) determine how failover proceeds:
+- **F1 (rate limit)**: retry same model with backoff (honor retry-after header), then walk chain
+- **F2 (quota exhausted)**: walk chain immediately (waiting won't help)
+- **F3 (model unavailable)**: walk chain immediately
+- **F4 (model not found)**: walk chain with config warning
+- **F5 (auth failure)**: hard-fail, never retry
+- **F6 (timeout)**: retry once, then walk chain
+- **F7 (quality failure)**: walk chain immediately (different model may do better)
+- **F8 (context overflow)**: walk chain to model with larger context window
 
 ```
-Classifying:
-  sakura:11434/qwen3.5-9b:iq4_xs
-  → gpt-5.3-codex-spark
-  → gpt-5.4-mini
+Classification:
+  classifier → light_reasoner → cloud_fast
 
-Light reasoning:
-  sakura:11435/qwen3.5:9b
-  → meru:11434/qwen3.5:9b          (redundant local)
-  → gpt-5.4-mini
-  → sonnet-4.6
+Reasoning:
+  light_reasoner → light_reasoner_backup → cloud_reasoner → cloud_coder
 
-Light coding:
-  sakura:11435/qwen3.5-9b-openclaw:tools
-  → gpt-5.3-codex-spark
-  → gpt-5.4-mini
+Coding:
+  light_coder → cloud_fast → cloud_mini → cloud_reasoner → cloud_coder
 
 Compaction:
-  sakura:11435/qwen3.5-9b:iq4_xs
-  → gpt-5.4-mini
-  → gpt-5.4
+  compactor → light_reasoner → cloud_mini
 
 Planning:
-  sakura:11435/qwen3.5:9b
-  → sonnet-4.6
-  → opus-4.6
+  light_reasoner → cloud_reasoner → cloud_coder
 
-Complex reasoning:
-  sonnet-4.6
-  → opus-4.6
-  → gpt-5.4
-
-Complex coding (needs tool access — Codex sub-agent):
-  gpt-5.3-codex-spark               (secondary bucket)
-  → gpt-5.4-mini                    (secondary bucket)
-  → sonnet-4.6                      (secondary bucket)
-  → gpt-5.4                         (primary — last resort)
+Evaluation:
+  light_reasoner → light_reasoner_backup → cloud_mini
 
 Review:
-  sonnet-4.6
-  → opus-4.6
-  → gpt-5.4
+  cloud_reasoner → cloud_coder
 ```
 
 ## Usage preservation strategy
@@ -125,16 +114,41 @@ The supervisor should track which bucket each call goes to and prefer secondary 
 
 ## Configuration
 
-```bash
-# Local Ollama endpoints
-export OLLAMA_CLASSIFIER_URL=http://sakura-wsl.taile41496.ts.net:11434
-export OLLAMA_CLASSIFIER_MODEL=qwen3.5-9b:iq4_xs
-export OLLAMA_REASONER_URL=http://sakura-wsl.taile41496.ts.net:11435
-export OLLAMA_REASONER_MODEL=qwen3.5:9b
-export OLLAMA_CODER_URL=http://sakura-wsl.taile41496.ts.net:11435
-export OLLAMA_CODER_MODEL=qwen3.5-9b-opus-openclaw-distilled:tools
-export OLLAMA_COMPACTOR_URL=http://sakura-wsl.taile41496.ts.net:11435
-export OLLAMA_COMPACTOR_MODEL=qwen3.5-9b:iq4_xs
-export OLLAMA_REASONER_BACKUP_URL=http://meru-wsl.taile41496.ts.net:11434
-export OLLAMA_REASONER_BACKUP_MODEL=qwen3.5:9b
+All model routing is configured in `.codex-multi/config.toml` per working directory. Environment variables are supported as fallback but the TOML config is preferred.
+
+```toml
+# .codex-multi/config.toml — see full example in repo root
+
+[models.classifier]
+endpoint = "http://sakura-wsl.taile41496.ts.net:11434"
+model = "qwen3.5-9b:iq4_xs"
+num_ctx = 4096
+provider = "ollama"
+reasoning = "off"
+
+[models.light_reasoner]
+endpoint = "http://sakura-wsl.taile41496.ts.net:11435"
+model = "qwen3.5-9b-opus-openclaw-distilled:tools"
+num_ctx = 16384
+provider = "ollama"
+reasoning = "on"
+
+[models.cloud_fast]
+entries = [
+    { provider = "openai", model = "gpt-5.3-codex-spark", weight = 100, reasoning = "xhigh" },
+]
+
+# Failover chains per task type
+[failover]
+reasoning = ["light_reasoner", "light_reasoner_backup", "cloud_reasoner", "cloud_coder"]
+coding = ["light_coder", "cloud_fast", "cloud_mini", "cloud_reasoner", "cloud_coder"]
+
+# Failover behavior
+[failover.behavior]
+retry_same_attempts = 2
+rate_limit_default_wait_ms = 5000
+rate_limit_max_wait_ms = 30000
+timeout_ms = 30000
 ```
+
+See [Implementation Status](implementation-status.md) for the full config format and all supported fields.

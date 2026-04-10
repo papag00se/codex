@@ -1410,21 +1410,78 @@ impl ModelClientSession {
         turn_metadata_header: Option<&str>,
     ) -> Result<ResponseStream> {
         // Per-request routing: classify and route to local or override cloud model.
-        use crate::local_routing::RouteResult;
-        let model_override: Option<ModelInfo>;
+        use crate::local_routing::{RouteResult, CloudFailoverCtx};
+        let mut model_override: Option<ModelInfo>;
+        let mut failover_ctx: Option<CloudFailoverCtx>;
         match crate::local_routing::route_request(prompt).await {
             RouteResult::Local(stream) => return Ok(stream),
-            RouteResult::CloudOverride(slug) => {
+            RouteResult::CloudOverride { slug, failover_ctx: ctx } => {
                 let mut m = model_info.clone();
                 m.slug = slug;
                 model_override = Some(m);
+                failover_ctx = ctx;
             }
             RouteResult::Default => {
                 model_override = None;
+                failover_ctx = None;
             }
         }
-        let model_info = model_override.as_ref().unwrap_or(model_info);
 
+        // Cloud request with failover retry loop.
+        // On HTTP errors (429, 503, etc.), consult the failover executor to
+        // determine the next model in the chain before propagating the error.
+        let mut cloud_attempt: u32 = 0;
+        loop {
+            let effective_model = model_override.as_ref().unwrap_or(model_info);
+
+            let result = self.stream_cloud_inner(
+                prompt,
+                effective_model,
+                session_telemetry,
+                effort,
+                summary,
+                service_tier,
+                turn_metadata_header,
+            ).await;
+
+            match result {
+                Ok(stream) => return Ok(stream),
+                Err(err) => {
+                    // Try cloud failover if we have chain context
+                    if let Some(ref mut ctx) = failover_ctx {
+                        let (status_code, error_msg) = extract_error_info(&err);
+                        if let Some(new_slug) = crate::local_routing::handle_cloud_failover(
+                            ctx,
+                            status_code,
+                            &error_msg,
+                            &mut cloud_attempt,
+                            None, // TODO: parse retry-after header
+                        ).await {
+                            let mut m = model_info.clone();
+                            m.slug = new_slug;
+                            model_override = Some(m);
+                            continue;
+                        }
+                    }
+                    // No failover available or chain exhausted — propagate error
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Inner cloud streaming — tries WebSocket then HTTP. Extracted so the
+    /// failover loop in `stream()` can retry with a different model slug.
+    async fn stream_cloud_inner(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<ServiceTier>,
+        turn_metadata_header: Option<&str>,
+    ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -1820,6 +1877,21 @@ fn api_error_http_status(error: &ApiError) -> Option<u16> {
     match error {
         ApiError::Transport(TransportError::Http { status, .. }) => Some(status.as_u16()),
         _ => None,
+    }
+}
+
+/// Extract HTTP status code and error message from a CodexErr for failover classification.
+fn extract_error_info(err: &codex_protocol::error::CodexErr) -> (Option<u16>, String) {
+    use codex_protocol::error::CodexErr;
+    match err {
+        CodexErr::UnexpectedStatus(e) => (Some(e.status.as_u16()), e.body.clone()),
+        CodexErr::ServerOverloaded => (Some(503), "server overloaded".into()),
+        CodexErr::UsageLimitReached(e) => (Some(429), format!("{e}")),
+        CodexErr::QuotaExceeded => (Some(429), "quota exceeded".into()),
+        CodexErr::InternalServerError => (Some(500), "internal server error".into()),
+        CodexErr::Stream(msg, _) => (None, msg.clone()),
+        CodexErr::ConnectionFailed(e) => (None, format!("{e}")),
+        _ => (None, format!("{err}")),
     }
 }
 

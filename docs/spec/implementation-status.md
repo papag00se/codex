@@ -2,22 +2,62 @@
 
 [< Spec Index](index.md)
 
-> Last updated: 2026-04-09
+> Last updated: 2026-04-10
 
 ## What's built
 
-### Rust crates (49 tests passing)
+### Rust crates (121 tests passing)
 
-**`codex-rs/routing/`** (codex-routing) — 36 tests
-- Task metrics extraction: all 27 regex patterns ported from Python reference
-- Route selection algorithm: full decision flow with context-window filtering, LLM-assisted selection, deterministic fallback
-- **LLM-based request classifier**: local qwen3.5-9b:iq4_xs on the 1080 classifies every request into: light_reasoner, light_coder, cloud_fast, cloud_mini, cloud_reasoner, cloud_coder
+**`codex-rs/routing/`** (codex-routing) — 108 tests
+
+Core routing:
+- **LLM-based request classifier** (`classifier.rs`): local qwen3.5-9b:iq4_xs on the 1080 classifies every request into: light_reasoner, light_coder, cloud_fast, cloud_mini, cloud_reasoner, cloud_coder
 - **Cloud tier routing**: classifier output drives model slug override — spark/mini/sonnet for secondary buckets, primary only for cloud_coder
 - **Weighted model distribution**: cloud roles with multiple entries use weighted random selection from `.codex-multi/config.toml`
-- **Project config loader**: reads `.codex-multi/config.toml` with model roles, failover chains, supervisor settings
-- Ollama HTTP client: async with per-endpoint semaphore, supports tool passing
-- Tool-call recovery: JSON blob recovery, embedded tool blocks, streaming partial drops
-- Classifier robustness: `<think>` tag stripping, malformed JSON recovery, 10s timeout fallback
+- **Classifier cache** (`classify_cache.rs`): skips 3-4s classifier LLM call when last 3 classifications match (30s TTL)
+- Task metrics extraction (`metrics.rs`): all 27 regex patterns ported from Python reference
+- Route selection algorithm (`engine.rs`): context-window filtering, LLM-assisted selection, deterministic fallback
+
+Context and compaction:
+- **Context stripping** (`context_strip.rs`): two strip levels (Reasoner: 2 turns/2K, Coder: 3 turns/4K). Removes binary blobs, think blocks, encrypted_content. Collapses poll patterns. 8 tests
+- **Full compaction pipeline** (`compaction/`): normalize → split_recent_raw → chunk → extract (LLM) → merge (deterministic) → render. Runs entirely on local Ollama — no proxy needed
+  - `normalize.rs`: strips encrypted_content, attachments, tool_result blocks; detects precompacted summaries
+  - `chunking.rs`: token-budget chunking at item boundaries with overlap
+  - `extract.rs`: calls Ollama compactor with structured JSON extraction prompt
+  - `merger.rs`: latest-non-empty for scalars, shallow-merge for dicts, deduplicated-reverse for lists
+  - `render.rs`: builds SessionHandoff and DurableMemorySet (5 markdown documents)
+
+Failover and reliability:
+- **Failover executor** (`failover.rs`): classifies failures into F1-F8 types, decides retry-same vs walk-chain vs hard-fail. 15 tests
+  - F1 (rate limit): retry with backoff, honor retry-after header, cap at max wait, then walk chain
+  - F2 (quota exhausted): walk chain immediately
+  - F3 (model unavailable): walk chain immediately
+  - F4 (model not found): walk chain with config warning
+  - F5 (auth failure): hard-fail, never retry
+  - F6 (timeout): retry once, then walk chain
+  - F7 (quality failure): walk chain immediately
+  - F8 (context overflow): walk chain to larger model
+- **Quality detection** (`quality.rs`): checks local responses for empty, too short, echo, refusal, empty code fence, repetition
+- **Tool-call recovery** (`tool_recovery.rs`): JSON blob recovery, embedded tool blocks, streaming partial drops
+
+Feedback and analytics:
+- **Routing feedback** (`feedback.rs`): records `RoutingOutcome` to `.codex-multi/routing_history.jsonl`, computes per-route success rates, injects `profile_context()` into classifier
+- **Codebase context** (`codebase_context.rs`): auto-detects languages, file count, test frameworks, build tools. Caches in `.codex-multi/context_cache.json` (1hr TTL)
+- **Budget pressure** (`budget_pressure.rs`): reads rate limit percentages, soft pressure at 50-70-90%, hard block of cloud_coder at 95%
+- **Cost analytics** (`cost_analytics.rs`): persistent `usage_log.jsonl` with aggregate summaries
+- **Usage tracking** (`usage.rs`): in-session per-model token tracking with bucket classification (local/secondary/primary)
+
+Model interaction:
+- **Ollama client pool** (`ollama.rs`): async with per-endpoint `tokio::Semaphore`. `chat()`, `chat_with_tools()`, `chat_stream()`. Warm model tracking per endpoint
+- **Streaming** (`ollama.rs`): `chat_stream()` yields `StreamChunk::Delta` / `StreamChunk::Done` via mpsc channel
+- **Tool format adapter** (`tool_format.rs`): converts Codex ToolSpec to Ollama function tool format
+- **Prompt adaptation** (`prompt_adapt.rs`): per-tier scaffolding — local gets step-by-step, cloud_fast gets "be concise", frontier gets no scaffolding
+- **Local dispatch** (`local_dispatch.rs`): `call_ollama_text()` for non-streaming Ollama calls
+
+Configuration:
+- **Project config** (`project_config.rs`): loads `.codex-multi/config.toml` with model roles, failover chains + behavior, supervisor settings, usage config, agent roles
+- **Routing config** (`config.rs`): `RoutingConfig` with all Ollama endpoints. `from_env()` and `from_project_config()`. Multi-tier: classifier, reasoner, reasoner_backup, light_coder, compactor + cloud flags
+- **Session memory** (`session_memory.rs`): saves/loads session handoffs to `.codex-multi/memory/`, prunes to 20
 
 **`codex-rs/supervisor/`** (codex-supervisor) — 13 tests
 - Task graph: deterministic state machine (Pending → Running → Evaluating → Completed/Failed/Skipped)
@@ -38,15 +78,20 @@
 
 **`codex-rs/core/src/local_routing.rs`** — per-request routing
 - Hooks into `ModelClientSession::stream()` — every model API call goes through the classifier
-- Local routes: call Ollama directly, translate to `ResponseEvent` stream
+- Local routes: call Ollama directly (streaming for reasoner, non-streaming with tools for coder), translate to `ResponseEvent` stream
 - Cloud routes: override `model_info.slug` for this request only (spark/mini/sonnet)
+- **Context stripping**: removes binary, truncates, collapses polls, keeps only recent turns before sending to 8K local models
+- **Compaction pipeline**: detects `<<<LOCAL_COMPACT>>>` sentinel, runs full normalize → chunk → extract → merge → render locally
+- **Classifier cache**: skips 3-4s LLM call when recent classifications are consistent
+- **Budget pressure**: injects rate limit data into classifier context, hard-blocks primary at 95%
 - Loads config from `.codex-multi/config.toml`, falls back to env vars
 - Health check via `/api/version` (fast, doesn't cold-load model)
 
 **`.codex-multi/config.toml`** — project config
 - Model roles: classifier, light_reasoner, light_reasoner_backup, light_coder, compactor, cloud_fast, cloud_mini, cloud_reasoner, cloud_coder
-- Weighted distribution: `entries = [{model, weight}, ...]` for cloud roles
-- Failover chains per task type
+- Weighted distribution: `entries = [{provider, model, weight, reasoning}, ...]` for cloud roles
+- Failover chains per task type: classification, coding, compaction, evaluation, planning, reasoning, review
+- **Failover behavior**: retry_same_attempts, retry_same_backoff_ms, rate_limit_default_wait_ms, rate_limit_max_wait_ms, timeout_ms
 - Supervisor behavior: max_iterations, timeout, retries, verification_command
 - Usage preservation: primary_warn_threshold, prefer_secondary
 
@@ -65,6 +110,18 @@
 | `tools/src/lib.rs` | +2 lines: exports |
 | `core/src/tools/spec.rs` | +3 lines: match arm |
 | `core/src/tools/handlers/mod.rs` | +2 lines: module |
+
+### Smoke tests
+
+**`tests/smoke_multi_agent.sh`** — 15 checks
+- Local routing responds to simple questions
+- Response quality (non-empty, reasonable length)
+- Classifier logs show activity
+- Context stripping removes binary, truncates, collapses polls
+- Compaction config loads correctly
+- Context preserved after stripping
+- Token savings vs unstripped
+- Routing infrastructure intact
 
 ## Live test results
 
@@ -102,15 +159,10 @@ Result: ✓ 12 parametrized pytest tests passing
 
 | # | Item | Status |
 |---|------|--------|
-| 7 | Sequential task context sharing (task 2 sees task 1 output) | Not started |
-| 8 | Verification loop end-to-end test | Not tested in full routing flow |
-| 9 | Supervisor tool handler reads project config | Only local_routing reads it |
-| 10 | Planner quality — use cloud for complex goals, local for simple | Local planner only |
-| 11 | Usage tracking across buckets | Config has thresholds, no tracking code |
-| 12 | Observability — routing decisions in TUI | Logged via tracing only |
-| 13 | Port compaction pipeline to Rust | Deferred (proxy handles it) |
-| 14 | Agent role configs | Deferred |
-| 15 | ToolSpec-to-Ollama format adapter | Infrastructure ready, adapter not ported |
+| 1 | Wire failover executor into request flow | Not wired — executor built but not called on errors |
+| 2 | Local coder multi-turn tool loop reliability | Simple calls work, complex multi-step unreliable |
+| 3 | Supervisor tool model guidance | Model doesn't always choose supervisor for complex goals |
+| 4 | Observability — routing decisions in TUI | Logged via tracing only |
 
 ## Build instructions
 
@@ -123,20 +175,29 @@ source routing/build-env.sh
 # Build
 cargo build -p codex-cli
 
-# Run tests
+# Run tests (121 total: 108 routing + 13 supervisor)
 cargo test -p codex-routing -p codex-supervisor
+
+# Run smoke tests
+bash tests/smoke_multi_agent.sh
 
 # Run with routing enabled (needs .codex-multi/config.toml in cwd)
 RUST_LOG=codex_core::local_routing=info,codex_routing=info ./target/debug/codex
 ```
 
-## Git log
+## Git log (recent)
 
 ```
+a31832961 Failover executor — classifies failures F1-F8, decides retry vs chain-walk
+4e19e0f9a Failover behavior config — retry, rate limit, timeout parameters
+9f6248099 Full compaction pipeline in Rust — no proxy needed
+38f855d3b Expanded smoke test: 15 checks for routing, stripping, compaction
+0ab00c723 Context stripping for local models — fit conversations in 8K context
+57dd5e69b Smoke test + local coder tool support
+069cb503d G14: Dynamic budget pressure — routing shifts based on rate limit data
+ea4ac2ff9 G3,G4,G8,G9: Cross-session memory, prompt adaptation, classifier cache, cost analytics
+df641074d G5: Streaming from local Ollama models
+811aa9939 G1,G2,G6,G7: Routing feedback, codebase context, warm GPU, quality detection
 742db265d Cloud tier routing + weighted distribution + classifier robustness
-df836893e Wire agent context forking — retries resume from previous agent's conversation
-c10fd5540 Track agent thread IDs for context resumption on retries
-fe576711a Wire .codex-multi/config.toml into routing — no env vars needed
-a4f8bc8f2 Add .codex-multi/config.toml and project config loader
 4bd210eac Multi-agent orchestration: routing, supervisor, per-request local model routing
 ```

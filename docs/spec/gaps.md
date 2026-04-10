@@ -47,12 +47,10 @@ Same task description goes to every model. Weaker models need more scaffolding.
 **What's needed:** Per-model prompt templates. More chain-of-thought for local, more concise for cloud.
 
 ### G5: Streaming from local models
-**Status:** DEFERRED (requires rework of response translation pipeline)  
+**Status:** DONE (`ollama.rs` `chat_stream()`, wired into `local_routing.rs` for reasoner path)  
 **Impact:** Medium — UI feels frozen during local responses
 
-Ollama calls use `stream: false`. For long responses, the UI shows nothing until complete.
-
-**What's needed:** Use `chat_stream` and translate chunks to `ResponseEvent::OutputTextDelta` in real time.
+Local reasoner responses now stream in real time via `chat_stream()` → `StreamChunk::Delta` → `ResponseEvent::OutputTextDelta`. Coder path uses non-streaming with tools (streaming + tool calls is complex).
 
 ### G6: GPU-aware warm model preference
 **Status:** DONE (warm_model tracking in OllamaClientPool)  
@@ -85,6 +83,24 @@ Every request waits for the 1080 classifier before doing anything.
 Usage tracker resets every session. No persistent view of where tokens are going.
 
 **What's needed:** Persist usage data to `.codex-multi/usage_history.jsonl`. CLI command or summary at session end.
+
+### G15: Failover executor wiring
+**Status:** IN PROGRESS — executor built (`failover.rs`, 15 tests), not yet wired into request flow  
+**Impact:** Medium — failures fall back to `RouteResult::Default` instead of walking configured chains
+
+The failover executor (`classify_failure()` + `decide_action()`) is complete and tested. It classifies HTTP errors into F1-F8 failure types and decides retry-same vs walk-chain vs hard-fail. But it's not yet called from:
+- `local_routing.rs`: quality failures should walk the failover chain instead of falling back to default cloud
+- `client.rs`: cloud HTTP errors (429, 503, etc.) should classify and walk the chain
+
+**What's needed:** Wire `failover::classify_failure()` and `failover::decide_action()` into the error handling paths in `local_routing.rs` and `client.rs`. On `RetrySame`, wait and retry. On `NextInChain`, override model and retry. On `HardFail`/`ChainExhausted`, surface the error.
+
+### G16: Local coder multi-turn tool reliability
+**Status:** NOT STARTED  
+**Impact:** Medium — simple tool calls work, complex multi-step tasks through local coder are unreliable
+
+Local coder can make single tool calls (read file, run command), but multi-turn tool loops (call → execute → feed result → call again) sometimes get stuck or produce malformed tool calls on the second turn.
+
+**What's needed:** Investigation into whether this is a prompt issue, tool format issue, or model limitation. May need turn-by-turn scaffolding for local tool loops.
 
 ## Future possibilities
 
