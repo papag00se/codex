@@ -4,39 +4,39 @@
 # --- Model roles ---
 
 [models.classifier]
-provider = "ollama"
 endpoint = "http://sakura-wsl.taile41496.ts.net:11434"
 model = "qwen3.5-9b:iq4_xs"
-reasoning = "off"
 num_ctx = 4096
+provider = "ollama"
+reasoning = "off"
 
 [models.light_reasoner]
-provider = "ollama"
-endpoint = "http://sakura-wsl.taile41496.ts.net:11435"
-model = "qwen3.5:9b"
-reasoning = "on"
-num_ctx = 8192
-
-[models.light_reasoner_backup]
-provider = "ollama"
-endpoint = "http://meru-wsl.taile41496.ts.net:11434"
-model = "qwen3.5:9b"
-reasoning = "on"
-num_ctx = 8192
-
-[models.light_coder]
-provider = "ollama"
 endpoint = "http://sakura-wsl.taile41496.ts.net:11435"
 model = "qwen3.5-9b-opus-openclaw-distilled:tools"
+num_ctx = 16384
+provider = "ollama"
+reasoning = "on"
+
+[models.light_reasoner_backup]
+endpoint = "http://meru-wsl.taile41496.ts.net:11434"
+model = "qwen3.5:9b"
+num_ctx = 16384
+provider = "ollama"
+reasoning = "on"
+
+[models.light_coder]
+endpoint = "http://sakura-wsl.taile41496.ts.net:11435"
+model = "qwen3.5-9b-opus-openclaw-distilled:tools"
+num_ctx = 16384
+provider = "ollama"
 reasoning = "off"
-num_ctx = 8192
 
 [models.compactor]
-provider = "ollama"
 endpoint = "http://sakura-wsl.taile41496.ts.net:11435"
-model = "qwen3.5-9b:iq4_xs"
-reasoning = "off"
+model = "qwen3.5-9b-opus-openclaw-distilled:tools"
 num_ctx = 16384
+provider = "ollama"
+reasoning = "off"
 
 [models.cloud_fast]
 entries = [
@@ -56,52 +56,84 @@ entries = [
 
 [models.cloud_coder]
 entries = [
+    { provider = "anthropic", model = "opus-4.6", weight = 30, reasoning = "medium" },
     { provider = "openai", model = "gpt-5.3-codex-spark", weight = 40, reasoning = "low" },
     { provider = "openai", model = "gpt-5.4", weight = 30, reasoning = "medium" },
-    { provider = "anthropic", model = "opus-4.6", weight = 30, reasoning = "medium" },
 ]
 
 # --- Routing ---
 
 [routing]
-strategy = "cost_first"
 compaction_model = "compactor"
+strategy = "cost_first"
 
 # --- Supervisor ---
 
 [supervisor]
 max_iterations = 50
-timeout_seconds = 7200
 max_retries_per_task = 3
+timeout_seconds = 7200
 # verification_command = "pytest tests/"
 
 # --- Failover chains ---
 
 [failover]
-reasoning = ["light_reasoner", "light_reasoner_backup", "cloud_reasoner", "cloud_coder"]
-coding = ["light_coder", "cloud_fast", "cloud_mini", "cloud_reasoner", "cloud_coder"]
 classification = ["classifier", "light_reasoner", "cloud_fast"]
+coding = [
+    "light_coder",
+    "cloud_fast",
+    "cloud_mini",
+    "cloud_reasoner",
+    "cloud_coder",
+]
 compaction = ["compactor", "light_reasoner", "cloud_mini"]
-review = ["cloud_reasoner", "cloud_coder"]
-planning = ["light_reasoner", "cloud_reasoner", "cloud_coder"]
 evaluation = ["light_reasoner", "light_reasoner_backup", "cloud_mini"]
+planning = ["light_reasoner", "cloud_reasoner", "cloud_coder"]
+reasoning = [
+    "light_reasoner",
+    "light_reasoner_backup",
+    "cloud_reasoner",
+    "cloud_coder",
+]
+review = ["cloud_reasoner", "cloud_coder"]
+
+# --- Failover behavior ---
+# Controls how failures are handled before walking the failover chains above.
+
+[failover.behavior]
+# F1 (rate limit) + F6 (timeout): retry same model before moving on
+retry_same_attempts = 2
+retry_same_backoff_ms = 1000
+
+# F1: honor retry-after header; if missing, wait this long
+rate_limit_default_wait_ms = 5000
+rate_limit_max_wait_ms = 30000
+
+# F6: how long before a request is considered timed out
+timeout_ms = 30000
+
+# F5 (auth failure): never retry, surface error immediately
+# F7 (quality failure): never retry same model, walk chain immediately
+# F2 (quota exhausted): walk chain immediately (waiting won't help)
+# F3 (unavailable) + F4 (not found): walk chain immediately
+# F8 (context overflow): walk chain (need larger context model)
 
 # --- Agent roles ---
 
 [roles.coder]
-nickname = "Coder"
 instructions = "You are a specialist coding agent. Implement the described change completely. Write clean, correct code. Commit your work when done."
+nickname = "Coder"
 
 [roles.reviewer]
-nickname = "Reviewer"
 instructions = "You are a code reviewer. Review the diff for bugs, security issues, and style problems. Do not modify files. Report issues with file path and line number."
+nickname = "Reviewer"
 
 [roles.test_runner]
-nickname = "Test Runner"
 instructions = "Run the specified test command and interpret the results. Report which tests passed, failed, and why. Do not modify source files."
+nickname = "Test Runner"
 
 # --- Usage preservation ---
 
 [usage]
-primary_warn_threshold = 0.7
 prefer_secondary = true
+primary_warn_threshold = 0.7

@@ -107,6 +107,7 @@ impl Default for SupervisorBehavior {
 }
 
 /// Failover chain configuration.
+/// Failover chain configuration — defines escalation paths per task type.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FailoverChains {
     #[serde(default)]
@@ -123,6 +124,62 @@ pub struct FailoverChains {
     pub planning: Vec<String>,
     #[serde(default)]
     pub evaluation: Vec<String>,
+
+    /// Controls how failures are handled before walking the chains.
+    #[serde(default)]
+    pub behavior: FailoverBehavior,
+}
+
+/// Failover behavior — controls retry and escalation parameters.
+///
+/// Failure types:
+/// F1 (rate limit): retry same model with backoff, then walk chain
+/// F2 (quota exhausted): walk chain immediately
+/// F3 (model unavailable): walk chain immediately
+/// F4 (model not found): walk chain immediately, log config error
+/// F5 (auth failure): hard-fail, don't retry
+/// F6 (timeout): retry same model once, then walk chain
+/// F7 (quality failure): walk chain immediately (same model = same garbage)
+/// F8 (context overflow): walk chain (need larger context model)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailoverBehavior {
+    /// F1 + F6: how many times to retry the same model before walking chain
+    #[serde(default = "default_fo_retry_attempts")]
+    pub retry_same_attempts: u32,
+
+    /// Backoff between retries of the same model (ms)
+    #[serde(default = "default_fo_backoff")]
+    pub retry_same_backoff_ms: u64,
+
+    /// F1: if no retry-after header, wait this long (ms)
+    #[serde(default = "default_fo_rate_limit_wait")]
+    pub rate_limit_default_wait_ms: u64,
+
+    /// F1: maximum wait for a rate limit, even if retry-after says longer
+    #[serde(default = "default_fo_rate_limit_max")]
+    pub rate_limit_max_wait_ms: u64,
+
+    /// F6: request timeout (ms)
+    #[serde(default = "default_fo_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_fo_retry_attempts() -> u32 { 2 }
+fn default_fo_backoff() -> u64 { 1000 }
+fn default_fo_rate_limit_wait() -> u64 { 5000 }
+fn default_fo_rate_limit_max() -> u64 { 30000 }
+fn default_fo_timeout() -> u64 { 30000 }
+
+impl Default for FailoverBehavior {
+    fn default() -> Self {
+        Self {
+            retry_same_attempts: default_fo_retry_attempts(),
+            retry_same_backoff_ms: default_fo_backoff(),
+            rate_limit_default_wait_ms: default_fo_rate_limit_wait(),
+            rate_limit_max_wait_ms: default_fo_rate_limit_max(),
+            timeout_ms: default_fo_timeout(),
+        }
+    }
 }
 
 /// Usage preservation configuration.
