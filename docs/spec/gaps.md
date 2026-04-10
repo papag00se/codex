@@ -26,8 +26,8 @@ The classifier sees the request text but not the codebase. A project context sec
 
 **Implementation:** Add `[context]` config section. On first run, scan repo for languages/frameworks. Include in classifier prompt.
 
-### G3: No cross-session memory
-**Status:** Not started  
+### G3: Cross-session memory
+**Status:** DONE (session_memory.rs, .codex-multi/memory/, planner_context injection)  
 **Impact:** High — system forgets everything between sessions
 
 Compaction preserves state within a session but not across. Prior decisions, rejected approaches, architectural understanding — all lost.
@@ -38,8 +38,8 @@ Compaction preserves state within a session but not across. Prior decisions, rej
 
 ## Important gaps (impact quality and cost)
 
-### G4: No prompt adaptation per model
-**Status:** Not started  
+### G4: Prompt adaptation per model
+**Status:** DONE (prompt_adapt.rs, per-tier scaffolding for task/planning/evaluation)  
 **Impact:** Medium — local 9B models need more explicit prompts than frontier models
 
 Same task description goes to every model. Weaker models need more scaffolding.
@@ -70,16 +70,16 @@ If local model produces hallucination or incomplete response, system returns it 
 
 **What's needed:** Quick quality check on local responses before returning. Can be simple (response too short, response is just code fences with no content, response repeats the question).
 
-### G8: Classifier latency bottleneck
-**Status:** Not started  
+### G8: Classifier latency reduction
+**Status:** DONE (classify_cache.rs, skip after 3 consecutive same-route, 30s TTL)  
 **Impact:** Medium — 3-4s latency on every turn from classifier
 
 Every request waits for the 1080 classifier before doing anything.
 
 **What's needed:** Classification caching, async classification, or confidence-based skip. If last 3 requests all went cloud_coder, skip classifier for the next one.
 
-### G9: No cost analytics across sessions
-**Status:** Not started  
+### G9: Persistent cost analytics
+**Status:** DONE (cost_analytics.rs, usage_log.jsonl, aggregate summaries)  
 **Impact:** Low-medium — can't tune routing without data
 
 Usage tracker resets every session. No persistent view of where tokens are going.
