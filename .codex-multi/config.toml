@@ -40,25 +40,26 @@ reasoning = "off"
 
 [models.cloud_fast]
 entries = [
-    { provider = "openai", model = "gpt-5.3-codex-spark", weight = 100, reasoning = "low" },
+    { provider = "openai", model = "gpt-5.3-codex-spark", weight = 100, reasoning = "xhigh" },
 ]
 
 [models.cloud_mini]
 entries = [
-    { provider = "openai", model = "gpt-5.4-mini", weight = 100, reasoning = "medium" },
+    { provider = "openai", model = "gpt-5.4-mini", weight = 100, reasoning = "high" },
 ]
 
 [models.cloud_reasoner]
 entries = [
-    { provider = "anthropic", model = "sonnet-4.6", weight = 70, reasoning = "medium" },
-    { provider = "openai", model = "gpt-5.4-mini", weight = 30, reasoning = "medium" },
+    { provider = "anthropic", model = "sonnet-4.6", weight = 50, reasoning = "max" },
+    { provider = "openai", model = "gpt-5.4", weight = 30, reasoning = "xhigh" },
+    { provider = "openai", model = "gpt-5.4-mini", weight = 30, reasoning = "xhigh" },
 ]
 
 [models.cloud_coder]
 entries = [
-    { provider = "anthropic", model = "opus-4.6", weight = 30, reasoning = "medium" },
-    { provider = "openai", model = "gpt-5.3-codex-spark", weight = 40, reasoning = "low" },
+    { provider = "anthropic", model = "opus-4.6", weight = 60, reasoning = "medium" },
     { provider = "openai", model = "gpt-5.4", weight = 30, reasoning = "medium" },
+    { provider = "openai", model = "gpt-5.3-codex-spark", weight = 20, reasoning = "xhigh" },
 ]
 
 # --- Routing ---
