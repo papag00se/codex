@@ -19,6 +19,7 @@ pub mod config;
 pub mod context_strip;
 pub mod cost_analytics;
 pub mod engine;
+pub mod failover;
 pub mod feedback;
 pub mod local_dispatch;
 pub mod metrics;
