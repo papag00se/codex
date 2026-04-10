@@ -7698,7 +7698,7 @@ async fn try_run_sampling_request(
                 sess.services.models_manager.refresh_if_new_etag(etag).await;
             }
             ResponseEvent::Completed {
-                response_id: _,
+                response_id,
                 token_usage,
             } => {
                 flush_assistant_text_segments_all(
@@ -7712,12 +7712,15 @@ async fn try_run_sampling_request(
                     .await;
 
                 // Record cloud usage for /stats routing metrics.
-                if let Some(ref usage) = token_usage {
-                    crate::local_routing::record_cloud_usage(
-                        &turn_context.model_info.slug,
-                        usage.input_tokens as u64,
-                        usage.output_tokens as u64,
-                    ).await;
+                // Skip local responses — they already record via try_local_model().
+                if response_id != "local_response" {
+                    if let Some(ref usage) = token_usage {
+                        crate::local_routing::record_cloud_usage(
+                            &turn_context.model_info.slug,
+                            usage.input_tokens as u64,
+                            usage.output_tokens as u64,
+                        ).await;
+                    }
                 }
 
                 should_emit_turn_diff = true;
