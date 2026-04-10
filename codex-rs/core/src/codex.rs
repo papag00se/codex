@@ -7710,6 +7710,16 @@ async fn try_run_sampling_request(
                 .await;
                 sess.update_token_usage_info(&turn_context, token_usage.as_ref())
                     .await;
+
+                // Record cloud usage for /stats routing metrics.
+                if let Some(ref usage) = token_usage {
+                    crate::local_routing::record_cloud_usage(
+                        &turn_context.model_info.slug,
+                        usage.input_tokens as u64,
+                        usage.output_tokens as u64,
+                    ).await;
+                }
+
                 should_emit_turn_diff = true;
 
                 needs_follow_up |= sess.has_pending_input().await;
