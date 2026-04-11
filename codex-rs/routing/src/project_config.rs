@@ -214,6 +214,26 @@ pub struct AgentRole {
     pub instructions: String,
 }
 
+/// CLI binary paths for external provider dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliBinaries {
+    /// Path to `claude` CLI binary. Default: "claude" (assumes on PATH).
+    #[serde(default = "default_claude_binary")]
+    pub claude: String,
+}
+
+fn default_claude_binary() -> String {
+    "claude".into()
+}
+
+impl Default for CliBinaries {
+    fn default() -> Self {
+        Self {
+            claude: default_claude_binary(),
+        }
+    }
+}
+
 /// The full project-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectConfig {
@@ -229,6 +249,8 @@ pub struct ProjectConfig {
     pub failover: FailoverChains,
     #[serde(default)]
     pub usage: UsageConfig,
+    #[serde(default)]
+    pub cli: CliBinaries,
 }
 
 impl ProjectConfig {

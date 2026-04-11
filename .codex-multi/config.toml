@@ -133,6 +133,13 @@ nickname = "Reviewer"
 instructions = "Run the specified test command and interpret the results. Report which tests passed, failed, and why. Do not modify source files."
 nickname = "Test Runner"
 
+# --- CLI binaries ---
+
+[cli]
+# Path to claude CLI binary. Default: "claude" (on PATH).
+# VS Code extension installs it at ~/.vscode-server/extensions/anthropic.claude-code-*/resources/native-binary/claude
+claude = "claude"
+
 # --- Usage preservation ---
 
 [usage]

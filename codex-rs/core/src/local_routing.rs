@@ -32,6 +32,7 @@ struct RoutingState {
     codebase_context: codex_routing::codebase_context::CodebaseContext,
     classify_cache: std::sync::Mutex<codex_routing::classify_cache::ClassifyCache>,
     budget: Arc<codex_routing::budget_pressure::BudgetState>,
+    claude_sessions: codex_routing::claude_cli::ClaudeSessionTracker,
 }
 
 /// Initialize the global routing state.
@@ -78,7 +79,8 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
                     codex_routing::classify_cache::ClassifyCache::new(),
                 );
                 let budget = Arc::new(codex_routing::budget_pressure::BudgetState::new());
-                Some(RoutingState { config, project_config, pool, usage, feedback, codebase_context, classify_cache, budget })
+                let claude_sessions = codex_routing::claude_cli::ClaudeSessionTracker::new();
+                Some(RoutingState { config, project_config, pool, usage, feedback, codebase_context, classify_cache, budget, claude_sessions })
             } else {
                 info!("Per-request routing disabled — classifier LLM not reachable, all requests go to cloud");
                 None
@@ -180,10 +182,14 @@ pub(crate) struct CloudFailoverCtx {
     pub behavior: codex_routing::project_config::FailoverBehavior,
 }
 
-/// What a role name resolves to — either a local Ollama endpoint or a cloud model slug.
+/// What a role name resolves to.
 enum ResolvedRole {
+    /// Local Ollama model.
     Local(OllamaEndpoint),
-    Cloud(String), // model slug
+    /// Cloud model via OpenAI Responses API (slug override).
+    Cloud(String),
+    /// Anthropic model via Claude CLI subprocess.
+    ClaudeExec { model: String },
 }
 
 /// Map a classifier route to the failover chain name.
@@ -240,10 +246,15 @@ fn resolve_role(role_name: &str, state: &RoutingState) -> Option<ResolvedRole> {
                 None
             }
         }
-        // Cloud roles — resolve to model slug via weighted selection
+        // Cloud roles — resolve via weighted selection, dispatch by provider
         "cloud_fast" | "cloud_mini" | "cloud_reasoner" | "cloud_coder" => {
-            pick_cloud_model(&state.project_config, role_name)
-                .map(ResolvedRole::Cloud)
+            match pick_cloud_model_with_provider(&state.project_config, role_name) {
+                Some((slug, provider)) if provider == "anthropic" => {
+                    Some(ResolvedRole::ClaudeExec { model: slug })
+                }
+                Some((slug, _)) => Some(ResolvedRole::Cloud(slug)),
+                None => None,
+            }
         }
         // Classifier itself — not a useful failover target
         "classifier" => None,
@@ -426,6 +437,76 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
                         behavior: behavior.clone(),
                     }),
                 };
+            }
+            Some(ResolvedRole::ClaudeExec { model }) => {
+                info!(
+                    route = %current_role,
+                    model = %model,
+                    reason = %classification.reason,
+                    "Routing to Anthropic via Claude CLI"
+                );
+
+                let prompt_text = extract_last_message(prompt);
+                let claude_binary = state.project_config.cli.claude.clone();
+                let cwd = std::env::current_dir().ok();
+
+                // Use conversation-level session key for context resumption
+                let session_key = "main"; // TODO: per-thread key if multi-agent
+                let resume_id = state.claude_sessions.get_session(session_key);
+
+                let result = codex_routing::claude_cli::invoke_claude(
+                    &claude_binary,
+                    &model,
+                    &prompt_text,
+                    resume_id.as_deref(),
+                    cwd.as_deref(),
+                ).await;
+
+                match result {
+                    Ok(cli_result) => {
+                        // Track session for resumption
+                        if let Some(ref sid) = cli_result.session_id {
+                            state.claude_sessions.set_session(session_key, sid);
+                        }
+
+                        // Record usage
+                        state.usage.record(&cli_result.model, cli_result.input_tokens, cli_result.output_tokens);
+
+                        let response = OllamaTextResponse {
+                            content: cli_result.content,
+                            model: cli_result.model,
+                            input_tokens: cli_result.input_tokens,
+                            output_tokens: cli_result.output_tokens,
+                        };
+                        return RouteResult::Local(ollama_response_to_stream(response));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Claude CLI failed");
+                        let action = failover::decide_action(
+                            FailureType::ModelUnavailable,
+                            &current_role,
+                            chain_name,
+                            &chain,
+                            attempt,
+                            None,
+                            behavior,
+                        );
+                        match action {
+                            FailoverAction::NextInChain { model_role, reason } => {
+                                info!(from = %current_role, to = %model_role, reason = %reason, "Failover from Claude CLI");
+                                current_role = model_role;
+                                attempt = 0;
+                                continue;
+                            }
+                            FailoverAction::RetrySame { wait, attempt: next } => {
+                                tokio::time::sleep(wait).await;
+                                attempt = next;
+                                continue;
+                            }
+                            _ => return RouteResult::Default,
+                        }
+                    }
+                }
             }
             Some(ResolvedRole::Local(endpoint)) => {
                 // Try this local model
@@ -747,29 +828,38 @@ fn pick_cloud_model(
     pc: &codex_routing::project_config::ProjectConfig,
     role_name: &str,
 ) -> Option<String> {
+    pick_cloud_model_with_provider(pc, role_name).map(|(slug, _)| slug)
+}
+
+/// Pick a cloud model and its provider from the project config.
+/// Returns (model_slug, provider_name) or None.
+fn pick_cloud_model_with_provider(
+    pc: &codex_routing::project_config::ProjectConfig,
+    role_name: &str,
+) -> Option<(String, String)> {
     use codex_routing::project_config::ModelRole;
 
     let role = pc.get_model(role_name)?;
     match role {
-        ModelRole::Single { model, .. } => Some(model.clone()),
+        ModelRole::Single { provider, model, .. } => {
+            Some((model.clone(), provider.clone()))
+        }
         ModelRole::Weighted { entries } => {
             if entries.is_empty() {
                 return None;
             }
-            // Weighted random selection
             let total_weight: u32 = entries.iter().map(|e| e.weight).sum();
             if total_weight == 0 {
-                return Some(entries[0].model.clone());
+                return Some((entries[0].model.clone(), entries[0].provider.clone()));
             }
             let mut pick = rand_u32() % total_weight;
             for entry in entries {
                 if pick < entry.weight {
-                    return Some(entry.model.clone());
+                    return Some((entry.model.clone(), entry.provider.clone()));
                 }
                 pick -= entry.weight;
             }
-            // Shouldn't reach here, but fallback to first
-            Some(entries[0].model.clone())
+            Some((entries[0].model.clone(), entries[0].provider.clone()))
         }
     }
 }

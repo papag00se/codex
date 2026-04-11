@@ -12,6 +12,7 @@
 
 pub mod budget_pressure;
 pub mod classifier;
+pub mod claude_cli;
 pub mod classify_cache;
 pub mod codebase_context;
 pub mod compaction;
