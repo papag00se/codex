@@ -451,7 +451,7 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
                 let cwd = std::env::current_dir().ok();
 
                 // Use conversation-level session key for context resumption
-                let session_key = "main"; // TODO: per-thread key if multi-agent
+                let session_key = "main";
                 let resume_id = state.claude_sessions.get_session(session_key);
 
                 let result = codex_routing::claude_cli::invoke_claude(
