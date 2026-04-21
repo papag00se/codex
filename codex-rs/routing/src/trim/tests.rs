@@ -255,6 +255,121 @@ fn failed_shell_output_kept_even_in_old_turn() {
 }
 
 #[test]
+fn world_state_includes_stale_warning_for_old_modifications() {
+    // Active turn is 5; file modified at turn 1 (4 turns ago) — should warn.
+    let items = vec![
+        user_msg("turn 0"),
+        user_msg("turn 1: edit"),
+        function_call(
+            "p1",
+            "apply_patch",
+            r#"{"input":"*** Add File: foo.py\n+x\n"}"#,
+        ),
+        function_output("p1", "ok", true),
+        user_msg("turn 2"),
+        user_msg("turn 3"),
+        user_msg("turn 4"),
+        user_msg("turn 5: active"),
+    ];
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+        },
+        16384,
+    );
+    assert!(
+        result.system.contains("turns ago"),
+        "should annotate turns_since on stale modifications:\n{}",
+        result.system
+    );
+    assert!(
+        result.system.contains("re-read with `cat <path>`")
+            || result
+                .system
+                .contains("re-read with `cat <path>`")
+            || result.system.to_lowercase().contains("re-read"),
+        "should suggest re-reading stale files:\n{}",
+        result.system
+    );
+}
+
+#[test]
+fn apply_patch_failure_gets_recovery_hint() {
+    let items = vec![
+        user_msg("edit foo.ts"),
+        function_call(
+            "p1",
+            "apply_patch",
+            r#"{"input":"*** Begin Patch\n*** Update File: foo.ts\n@@\n-old\n+new\n*** End Patch"}"#,
+        ),
+        function_output(
+            "p1",
+            "apply_patch verification failed: Failed to find context '@@' in /tmp/foo.ts",
+            false,
+        ),
+    ];
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+        },
+        16384,
+    );
+    let combined: String = result
+        .messages
+        .iter()
+        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("→ Hint:"),
+        "failed apply_patch should get a recovery hint:\n{combined}"
+    );
+    assert!(
+        combined.contains("Re-read the file"),
+        "hint should mention re-reading the file:\n{combined}"
+    );
+}
+
+#[test]
+fn shell_regex_failure_gets_glob_hint() {
+    let items = vec![
+        user_msg("find ts files"),
+        function_call(
+            "s1",
+            "shell",
+            r#"{"command":["bash","-lc","rg '*.ts'"]}"#,
+        ),
+        function_output(
+            "s1",
+            r#"{"output":"rg: regex parse error:\n    repetition operator missing expression","metadata":{"exit_code":2,"duration_seconds":0.0}}"#,
+            true,
+        ),
+    ];
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+        },
+        16384,
+    );
+    let combined: String = result
+        .messages
+        .iter()
+        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("rg --files -g") || combined.contains("→ Hint:"),
+        "rg regex failure should suggest --files -g:\n{combined}"
+    );
+}
+
+#[test]
 fn world_state_lists_modified_files() {
     let items = vec![
         user_msg("turn 1: create"),

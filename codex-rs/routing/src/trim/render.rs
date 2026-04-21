@@ -18,8 +18,13 @@ use super::state_extract::ExtractedState;
 use super::state_extract::ModifyOp;
 
 /// Render the full prelude block. Empty if there's nothing to say (e.g. an
-/// empty transcript with no user instructions).
-pub fn render_prelude(user_instructions: Option<&str>, state: &ExtractedState) -> String {
+/// empty transcript with no user instructions). The `active_turn` is used to
+/// compute "turns since last modification" hints in the world-state block.
+pub fn render_prelude(
+    user_instructions: Option<&str>,
+    state: &ExtractedState,
+    active_turn: u32,
+) -> String {
     let mut sections: Vec<String> = Vec::new();
 
     if let Some(inst) = user_instructions
@@ -28,7 +33,7 @@ pub fn render_prelude(user_instructions: Option<&str>, state: &ExtractedState) -
         sections.push(format!("[Persistent project context]\n{}", inst.trim()));
     }
 
-    let world = render_world_state(state);
+    let world = render_world_state(state, active_turn);
     if !world.is_empty() {
         sections.push(world);
     }
@@ -56,7 +61,7 @@ pub fn render_prelude(user_instructions: Option<&str>, state: &ExtractedState) -
     sections.join("\n\n")
 }
 
-fn render_world_state(state: &ExtractedState) -> String {
+fn render_world_state(state: &ExtractedState, active_turn: u32) -> String {
     if state.files_seen.is_empty() && state.files_modified.is_empty() {
         return String::new();
     }
@@ -72,19 +77,37 @@ fn render_world_state(state: &ExtractedState) -> String {
                 .join(", ")
         ));
     }
+    let mut any_stale = false;
     if !state.files_modified.is_empty() {
-        let mut by_op: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut by_op: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for (path, m) in &state.files_modified {
             let label = match m.op {
                 ModifyOp::Created => "Created",
                 ModifyOp::Edited => "Edited",
                 ModifyOp::Deleted => "Deleted",
             };
-            by_op.entry(label).or_default().push(path.as_str());
+            // Show modification turn so the model can judge freshness.
+            // Anything older than 2 turns from the active turn is likely
+            // stale in the model's working memory and should be re-read
+            // before further edits.
+            let turns_since = active_turn.saturating_sub(m.turn_id);
+            let entry = if turns_since >= 2 {
+                any_stale = true;
+                format!("{path} (turn {}, {} turns ago — content likely stale)", m.turn_id, turns_since)
+            } else {
+                format!("{path} (turn {})", m.turn_id)
+            };
+            by_op.entry(label).or_default().push(entry);
         }
         for (label, paths) in by_op {
             lines.push(format!("{label}: {}", paths.join(", ")));
         }
+    }
+    if any_stale {
+        lines.push(
+            "NOTE: Some files were edited multiple turns ago. Before patching them again, re-read with `cat <path>` (or `apply_patch` will likely fail with 'Failed to find context')."
+                .to_string(),
+        );
     }
     lines.join("\n")
 }
@@ -290,11 +313,22 @@ pub fn render_messages(
                 // Distinguishing `<tool_error>` from `<tool_result>` gives
                 // the model an obvious visual signal that the previous call
                 // failed and needs to be retried with a different approach.
+                //
+                // For specific error patterns we recognize, append a hint that
+                // points the model toward the right next action. This is
+                // important for local models that don't always parse error
+                // messages closely enough to figure out the recovery on their
+                // own.
                 let tag = if *success { "tool_result" } else { "tool_error" };
+                let hint = if !*success {
+                    tool_failure_hint(tool_name, content)
+                } else {
+                    String::new()
+                };
                 messages.push(serde_json::json!({
                     "role": "user",
                     "content": format!(
-                        "<{tag} tool=\"{tool_name}\" call_id=\"{call_id}\">\n{content}\n</{tag}>"
+                        "<{tag} tool=\"{tool_name}\" call_id=\"{call_id}\">\n{content}\n</{tag}>{hint}"
                     ),
                 }));
             }
@@ -314,5 +348,50 @@ fn short(s: &str, n: usize) -> String {
         cleaned
     } else {
         format!("{}…", &cleaned[..n])
+    }
+}
+
+/// Produce a follow-up hint for a failed tool output, matched on tool name
+/// and error content. Returned hint is appended after the `<tool_error>`
+/// block so the model sees a clear next step. Empty string means no hint.
+fn tool_failure_hint(tool_name: &str, content: &str) -> String {
+    let prefix = "\n\n→ Hint: ";
+    match tool_name {
+        "apply_patch" => {
+            if content.contains("Failed to find context") {
+                format!(
+                    "{prefix}The patch's context lines don't match the file's current content — your in-memory view is stale. Re-read the file with `shell` `cat <path>` (or `nl -ba <path>` for line numbers) BEFORE constructing the next patch."
+                )
+            } else if content.contains("first line of the patch must be '*** Begin Patch'") {
+                format!("{prefix}Add `*** Begin Patch` as the very first line of the `input` string.")
+            } else if content.contains("last line of the patch must be '*** End Patch'") {
+                format!("{prefix}Add `*** End Patch` as the very last line of the `input` string.")
+            } else if content.contains("not a valid hunk header") {
+                format!(
+                    "{prefix}Hunk content lines must be prefixed with `+` (additions), `-` (deletions), or ` ` (context). Headers are `*** Add File: <path>`, `*** Update File: <path>`, `*** Delete File: <path>`, or `@@ ... @@`."
+                )
+            } else {
+                String::new()
+            }
+        }
+        "shell" | "exec_command" | "shell_command" | "local_shell" => {
+            if content.contains("regex parse error") || content.contains("repetition operator missing expression")
+            {
+                format!(
+                    "{prefix}`rg` interpreted your argument as a regex with invalid syntax. For file globbing use `rg --files -g '<glob>'` (e.g. `-g '*.ts'`), repeated for each glob."
+                )
+            } else if content.contains("command not found") {
+                format!(
+                    "{prefix}The command isn't installed or isn't on PATH in this sandbox. Try `which <command>` first, or use a different tool that's available."
+                )
+            } else if content.contains("Permission denied") || content.contains("EACCES") {
+                format!(
+                    "{prefix}The sandbox blocked this. Use `request_permissions` first to escalate, then retry the command."
+                )
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
     }
 }

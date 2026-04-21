@@ -102,7 +102,7 @@ pub fn trim_for_local(input: &TrimInput, target_ctx: usize) -> TrimResult {
     let extracted = state_extract::extract(&parsed, active_turn);
     let compressed_older = rules::compress_older_turns(&parsed, active_turn);
 
-    let prelude = render::render_prelude(input.user_instructions, &extracted);
+    let prelude = render::render_prelude(input.user_instructions, &extracted, active_turn);
     let (messages, older_turn_message_count) =
         render::render_messages(&compressed_older, &parsed, active_turn);
 
