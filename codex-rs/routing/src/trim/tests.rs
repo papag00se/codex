@@ -255,6 +255,113 @@ fn failed_shell_output_kept_even_in_old_turn() {
 }
 
 #[test]
+fn repetition_detected_after_three_identical_calls() {
+    // Same shell command called three times with identical args — typical
+    // "stuck loop" pattern from local models when an API returns the same
+    // error repeatedly.
+    let curl_args = r#"{"command":["bash","-lc","curl -s https://api.example.com/foo"]}"#;
+    let bad_output = r#"{"output":"<!DOCTYPE html><html>404</html>","metadata":{"exit_code":0,"duration_seconds":0.1}}"#;
+    let items = vec![
+        user_msg("check the api"),
+        function_call("c1", "shell", curl_args),
+        function_output("c1", bad_output, true),
+        function_call("c2", "shell", curl_args),
+        function_output("c2", bad_output, true),
+        function_call("c3", "shell", curl_args),
+        function_output("c3", bad_output, true),
+    ];
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+        },
+        16384,
+    );
+    assert!(
+        result.system.contains("[STOP — REPETITION DETECTED]"),
+        "should surface repetition alert:\n{}",
+        result.system
+    );
+    assert!(
+        result.system.contains("3 times"),
+        "should mention the count:\n{}",
+        result.system
+    );
+    // Alert should be at the top of the system prompt, before other blocks.
+    let stop_idx = result.system.find("[STOP").unwrap();
+    if let Some(world_idx) = result.system.find("[World state]") {
+        assert!(
+            stop_idx < world_idx,
+            "[STOP] alert should come before [World state]"
+        );
+    }
+}
+
+#[test]
+fn no_repetition_alert_after_only_two_identical_calls() {
+    // Two calls is fine — could be a legitimate retry. Don't false-positive.
+    let curl_args = r#"{"command":["bash","-lc","curl -s https://api.example.com/foo"]}"#;
+    let items = vec![
+        user_msg("check the api"),
+        function_call("c1", "shell", curl_args),
+        function_output("c1", "ok", true),
+        function_call("c2", "shell", curl_args),
+        function_output("c2", "ok", true),
+    ];
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+        },
+        16384,
+    );
+    assert!(
+        !result.system.contains("[STOP — REPETITION DETECTED]"),
+        "two calls shouldn't trigger the alert:\n{}",
+        result.system
+    );
+}
+
+#[test]
+fn no_repetition_alert_when_calls_have_different_args() {
+    let items = vec![
+        user_msg("check things"),
+        function_call(
+            "c1",
+            "shell",
+            r#"{"command":["bash","-lc","curl https://api.example.com/foo"]}"#,
+        ),
+        function_output("c1", "x", true),
+        function_call(
+            "c2",
+            "shell",
+            r#"{"command":["bash","-lc","curl https://api.example.com/bar"]}"#,
+        ),
+        function_output("c2", "y", true),
+        function_call(
+            "c3",
+            "shell",
+            r#"{"command":["bash","-lc","curl https://api.example.com/baz"]}"#,
+        ),
+        function_output("c3", "z", true),
+    ];
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+        },
+        16384,
+    );
+    assert!(
+        !result.system.contains("[STOP — REPETITION DETECTED]"),
+        "different args shouldn't trigger the alert"
+    );
+}
+
+#[test]
 fn world_state_includes_stale_warning_for_old_modifications() {
     // Active turn is 5; file modified at turn 1 (4 turns ago) — should warn.
     let items = vec![

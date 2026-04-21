@@ -25,6 +25,18 @@ pub struct ExtractedState {
     pub unresolved_errors: Vec<UnresolvedError>,
     pub in_flight: Vec<InFlight>,
     pub test_runs: Vec<TestRun>,
+    /// When the model is stuck calling the same tool with identical args
+    /// repeatedly. Surfaced prominently in the prelude so the model is
+    /// nudged to try a different approach.
+    pub repetition: Option<RepetitionAlert>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepetitionAlert {
+    pub tool_name: String,
+    pub command_summary: String,
+    pub count: usize,
+    pub last_output_excerpt: String,
 }
 
 #[derive(Debug, Clone)]
@@ -177,7 +189,89 @@ pub fn extract(parsed: &ParsedTranscript, _active_turn: u32) -> ExtractedState {
         });
     }
 
+    state.repetition = detect_repetition(parsed);
+
     state
+}
+
+/// Detect when the model is stuck calling the same tool with the same args
+/// repeatedly. Walk the most recent ToolCall items in order; if the last 3+
+/// share the same `(tool_name, signature)`, that's a stuck loop.
+///
+/// Threshold: 3 consecutive identical calls. Two could be a legitimate retry
+/// after a transient error; three means the model isn't learning from the
+/// outputs.
+fn detect_repetition(parsed: &ParsedTranscript) -> Option<RepetitionAlert> {
+    const THRESHOLD: usize = 3;
+
+    // Walk from the end, collecting consecutive ToolCall signatures until we
+    // hit a different signature or a non-ToolCall, non-ToolOutput item.
+    let mut last_signature: Option<(String, String)> = None;
+    let mut count = 0usize;
+    let mut last_call_args: Option<String> = None;
+    let mut last_call_id: Option<String> = None;
+
+    for item in parsed.items.iter().rev() {
+        match item {
+            TrimItem::ToolCall {
+                tool_name,
+                signature,
+                args,
+                call_id,
+                ..
+            } => {
+                let key = (tool_name.clone(), signature.clone());
+                match &last_signature {
+                    None => {
+                        last_signature = Some(key);
+                        last_call_args = Some(args.clone());
+                        last_call_id = Some(call_id.clone());
+                        count = 1;
+                    }
+                    Some(prev) if *prev == key => {
+                        count += 1;
+                    }
+                    Some(_) => break,
+                }
+            }
+            // Tool outputs interleave with calls; skip them.
+            TrimItem::ToolOutput { .. } => continue,
+            // Anything else (user message, assistant text) breaks the streak.
+            _ => break,
+        }
+    }
+
+    if count < THRESHOLD {
+        return None;
+    }
+
+    let (tool_name, _) = last_signature?;
+    let command_summary = short_args(last_call_args.as_deref().unwrap_or(""), 100);
+
+    // Pull the most recent matching output's excerpt for context.
+    let last_output_excerpt = last_call_id
+        .as_ref()
+        .and_then(|id| {
+            parsed.items.iter().rev().find_map(|item| {
+                if let TrimItem::ToolOutput {
+                    call_id, content, ..
+                } = item
+                    && call_id == id
+                {
+                    Some(excerpt(content, 200))
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default();
+
+    Some(RepetitionAlert {
+        tool_name,
+        command_summary,
+        count,
+        last_output_excerpt,
+    })
 }
 
 fn derive_modification(tool_name: &str, args_raw: &str) -> Option<(String, ModifyOp)> {

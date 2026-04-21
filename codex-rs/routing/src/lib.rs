@@ -16,6 +16,7 @@ pub mod classify_cache;
 pub mod claude_cli;
 pub mod codebase_context;
 pub mod compaction;
+pub mod completion_verifier;
 pub mod config;
 pub mod context_strip;
 pub mod cost_analytics;

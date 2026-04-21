@@ -1068,23 +1068,36 @@ async fn try_local_model(
             "Passing tool set to local coder"
         );
 
-        let result = state
-            .pool
-            .chat_with_tools(
-                &endpoint.base_url,
-                &endpoint.model,
-                messages.clone(),
-                system.as_deref(),
-                endpoint.temperature,
-                endpoint.num_ctx,
-                None,
-                endpoint.timeout_seconds,
-                Some(ollama_tools),
-                endpoint.think,
-            )
-            .await;
+        // Loop here so we can re-call the model up to MAX_BAIL_RETRIES times
+        // when the completion verifier flags a "bail" — see the body of the
+        // loop for details.
+        const MAX_BAIL_RETRIES: usize = 1;
+        let mut effective_messages = messages.clone();
+        let mut continuation_count = 0usize;
+        let last_user_message = extract_last_message(prompt);
 
-        if let Some(body) = result {
+        loop {
+            let result = state
+                .pool
+                .chat_with_tools(
+                    &endpoint.base_url,
+                    &endpoint.model,
+                    effective_messages.clone(),
+                    system.as_deref(),
+                    endpoint.temperature,
+                    endpoint.num_ctx,
+                    None,
+                    endpoint.timeout_seconds,
+                    Some(ollama_tools.clone()),
+                    endpoint.think,
+                )
+                .await;
+
+            let Some(body) = result else {
+                warn!("Local coder with tools failed");
+                return Err(FailureType::ModelUnavailable);
+            };
+
             let message = body.get("message").cloned().unwrap_or_default();
             let content = message
                 .get("content")
@@ -1106,11 +1119,55 @@ async fn try_local_model(
             info!(
                 content_len = content.len(),
                 native_tool_calls = native_tool_calls.len(),
+                continuation_count,
                 "Local coder response received"
             );
 
             // Record local usage for /stats
             state.usage.record(&model_name, input_tokens, output_tokens);
+
+            // Completion verification: when the model produced text-only with
+            // no tool calls, ask the classifier whether the response is a
+            // legitimate completion or an "announcement-then-bail." If a
+            // bail, inject a continuation prompt and re-call (capped).
+            if native_tool_calls.is_empty()
+                && !content.trim().is_empty()
+                && continuation_count < MAX_BAIL_RETRIES
+                && !last_user_message.trim().is_empty()
+            {
+                let verdict = codex_routing::completion_verifier::verify_completion(
+                    &last_user_message,
+                    &content,
+                    &state.config.classifier,
+                    &state.pool,
+                )
+                .await;
+                info!(
+                    verdict = ?verdict,
+                    "Completion verifier judged the model's text-only response"
+                );
+                if matches!(
+                    verdict,
+                    codex_routing::completion_verifier::CompletionVerdict::Bail
+                ) {
+                    let continuation = codex_routing::completion_verifier::continuation_prompt(
+                        &content,
+                    );
+                    // Preserve the model's prior text in history so it can
+                    // see what it just said, then append the verifier's
+                    // continuation prompt as a synthesized user message.
+                    effective_messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": content,
+                    }));
+                    effective_messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": continuation,
+                    }));
+                    continuation_count += 1;
+                    continue;
+                }
+            }
 
             return Ok(ollama_tool_response_to_stream(
                 content,
@@ -1119,9 +1176,6 @@ async fn try_local_model(
                 input_tokens,
                 output_tokens,
             ));
-        } else {
-            warn!("Local coder with tools failed");
-            return Err(FailureType::ModelUnavailable);
         }
     }
 

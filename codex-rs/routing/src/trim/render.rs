@@ -27,6 +27,13 @@ pub fn render_prelude(
 ) -> String {
     let mut sections: Vec<String> = Vec::new();
 
+    // Repetition alert goes FIRST, before everything else, so the model can't
+    // miss it. Local models otherwise get stuck calling the same tool with
+    // the same args 5+ times in a row, ignoring identical outputs.
+    if let Some(alert) = render_repetition_alert(state) {
+        sections.push(alert);
+    }
+
     if let Some(inst) = user_instructions
         && !inst.trim().is_empty()
     {
@@ -59,6 +66,18 @@ pub fn render_prelude(
     }
 
     sections.join("\n\n")
+}
+
+fn render_repetition_alert(state: &ExtractedState) -> Option<String> {
+    let alert = state.repetition.as_ref()?;
+    Some(format!(
+        "[STOP — REPETITION DETECTED]\n\
+         You have called `{}` with identical arguments {} times in a row. The result will not change. STOP making this call.\n\
+         Last call: {}\n\
+         Last output excerpt: {}\n\
+         You MUST try a different approach now: change the arguments, use a different tool, or report what you've learned to the user. Repeating the same call is a wasted turn.",
+        alert.tool_name, alert.count, alert.command_summary, alert.last_output_excerpt
+    ))
 }
 
 fn render_world_state(state: &ExtractedState, active_turn: u32) -> String {
