@@ -124,9 +124,10 @@ pub async fn invoke_claude(
         "Invoking Claude CLI"
     );
 
-    let output = cmd.output().await.map_err(|e| {
-        format!("Failed to spawn claude CLI ({claude_binary}): {e}")
-    })?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to spawn claude CLI ({claude_binary}): {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -146,10 +147,9 @@ pub async fn invoke_claude(
 
     // Try parsing as JSON first
     if let Ok(resp) = serde_json::from_str::<ClaudeJsonResponse>(&stdout) {
-        let content = resp.result
-            .or(resp.content)
-            .unwrap_or_default();
-        let (input_tokens, output_tokens) = resp.usage
+        let content = resp.result.or(resp.content).unwrap_or_default();
+        let (input_tokens, output_tokens) = resp
+            .usage
             .map(|u| (u.input_tokens, u.output_tokens))
             .unwrap_or((0, 0));
 

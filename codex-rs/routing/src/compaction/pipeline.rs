@@ -57,10 +57,8 @@ pub async fn compact_transcript(
     );
 
     // Step 2: Split recent raw turns
-    let (compactable, recent_raw) = split_recent_raw(
-        &normalized.compactable_items,
-        config.keep_raw_tokens,
-    );
+    let (compactable, recent_raw) =
+        split_recent_raw(&normalized.compactable_items, config.keep_raw_tokens);
     info!(
         compactable = compactable.len(),
         recent_raw = recent_raw.len(),
@@ -126,15 +124,13 @@ pub async fn compact_transcript(
         recent_raw,
         normalized.precompacted_items,
         normalized.preserved_tail,
-    ].concat();
+    ]
+    .concat();
 
     let memory = render_durable_memory(&merged, &all_recent, current_request);
     let summary = render_compaction_summary(&memory, current_request);
 
-    info!(
-        summary_len = summary.len(),
-        "Compaction complete"
-    );
+    info!(summary_len = summary.len(), "Compaction complete");
 
     Ok(summary)
 }

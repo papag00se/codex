@@ -105,16 +105,25 @@ pub async fn extract_chunk(
 }
 
 /// Parse the LLM's JSON response into a ChunkExtraction.
-fn parse_extraction(content: &str, chunk_id: usize, source_tokens: usize) -> Result<ChunkExtraction, String> {
+fn parse_extraction(
+    content: &str,
+    chunk_id: usize,
+    source_tokens: usize,
+) -> Result<ChunkExtraction, String> {
     let parsed: serde_json::Value = serde_json::from_str(content.trim())
         .map_err(|e| format!("Failed to parse extraction JSON: {e}"))?;
 
-    let obj = parsed.as_object()
+    let obj = parsed
+        .as_object()
         .ok_or("Extraction response is not a JSON object")?;
 
     Ok(ChunkExtraction {
         chunk_id,
-        objective: obj.get("objective").and_then(|v| v.as_str()).unwrap_or("").into(),
+        objective: obj
+            .get("objective")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
         repo_state: parse_repo_state(obj.get("repo_state")),
         files_touched: parse_string_list(obj.get("files_touched")),
         commands_run: parse_string_list(obj.get("commands_run")),
@@ -134,10 +143,13 @@ fn parse_extraction(content: &str, chunk_id: usize, source_tokens: usize) -> Res
 
 /// Parse repo_state — handles both dict and array-of-entries formats.
 fn parse_repo_state(value: Option<&serde_json::Value>) -> HashMap<String, String> {
-    let Some(value) = value else { return HashMap::new() };
+    let Some(value) = value else {
+        return HashMap::new();
+    };
 
     if let Some(obj) = value.as_object() {
-        return obj.iter()
+        return obj
+            .iter()
             .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").into()))
             .collect();
     }
@@ -163,7 +175,9 @@ fn parse_repo_state(value: Option<&serde_json::Value>) -> HashMap<String, String
 
 /// Parse a JSON value into a Vec<String>.
 fn parse_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
-    let Some(arr) = value.and_then(|v| v.as_array()) else { return Vec::new() };
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
     arr.iter()
         .filter_map(|v| v.as_str().map(String::from))
         .filter(|s| !s.is_empty())

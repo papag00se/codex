@@ -21,15 +21,15 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
-use codex_routing::config::RoutingConfig;
 use codex_routing::OllamaClientPool;
-use codex_supervisor::run_supervisor;
+use codex_routing::config::RoutingConfig;
 use codex_supervisor::DispatchResult;
 use codex_supervisor::SupervisorConfig;
 use codex_supervisor::SupervisorJudge;
 use codex_supervisor::Task as SupervisorTask;
 use codex_supervisor::TaskStatus;
 use codex_supervisor::TerminationReason;
+use codex_supervisor::run_supervisor;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -141,7 +141,9 @@ impl ToolHandler for SupervisorHandler {
         };
 
         let args: SupervisorArgs = serde_json::from_str(&arguments).map_err(|err| {
-            FunctionCallError::RespondToModel(format!("failed to parse supervisor arguments: {err}"))
+            FunctionCallError::RespondToModel(format!(
+                "failed to parse supervisor arguments: {err}"
+            ))
         })?;
 
         info!(goal = %args.goal, "Supervisor tool invoked");
@@ -154,9 +156,11 @@ impl ToolHandler for SupervisorHandler {
         let supervisor_config = SupervisorConfig {
             max_iterations: project_config.supervisor.max_iterations,
             timeout: std::time::Duration::from_secs(project_config.supervisor.timeout_seconds),
-            max_retries_per_task: args.max_retries
+            max_retries_per_task: args
+                .max_retries
                 .unwrap_or(project_config.supervisor.max_retries_per_task),
-            verification_command: args.verification_command
+            verification_command: args
+                .verification_command
                 .or(project_config.supervisor.verification_command.clone()),
         };
         let routing_config = RoutingConfig::from_project_config(&project_config);
@@ -171,7 +175,10 @@ impl ToolHandler for SupervisorHandler {
 
         let result = run_supervisor(&args.goal, &supervisor_config, &judge).await;
 
-        let success = matches!(result.termination_reason, TerminationReason::AllTasksComplete);
+        let success = matches!(
+            result.termination_reason,
+            TerminationReason::AllTasksComplete
+        );
         let summary = format!(
             "Supervisor completed: {}/{} tasks done, {} failed. Reason: {:?}. Iterations: {}.",
             result.completed_tasks,
@@ -234,7 +241,8 @@ impl CodexJudge {
         prompt: &str,
         output_schema: Option<JsonValue>,
     ) -> Result<(String, String), String> {
-        self.spawn_and_wait_with_fork(prompt, output_schema, None).await
+        self.spawn_and_wait_with_fork(prompt, output_schema, None)
+            .await
     }
 
     /// Spawn a sub-agent, optionally forking from a previous agent's conversation.
@@ -310,9 +318,10 @@ impl CodexJudge {
 
         let tid_string = thread_id.to_string();
         match status {
-            AgentStatus::Completed(msg) => {
-                Ok((msg.unwrap_or_else(|| "Agent completed (no message)".into()), tid_string))
-            }
+            AgentStatus::Completed(msg) => Ok((
+                msg.unwrap_or_else(|| "Agent completed (no message)".into()),
+                tid_string,
+            )),
             AgentStatus::Errored(err) => Err(format!("Agent errored: {err}")),
             AgentStatus::Shutdown => Err("Agent was shut down".into()),
             other => Err(format!("Agent ended with unexpected status: {other:?}")),
@@ -320,20 +329,27 @@ impl CodexJudge {
     }
 
     /// Call a local Ollama endpoint directly (free, no API cost).
-    async fn call_endpoint(&self, ep: &codex_routing::config::OllamaEndpoint, prompt: &str) -> Result<String, String> {
+    async fn call_endpoint(
+        &self,
+        ep: &codex_routing::config::OllamaEndpoint,
+        prompt: &str,
+    ) -> Result<String, String> {
         if !ep.enabled {
             return Err("Endpoint disabled".into());
         }
-        let response = self.ollama_pool.chat(
-            &ep.base_url,
-            &ep.model,
-            vec![serde_json::json!({"role": "user", "content": prompt})],
-            None,
-            ep.temperature,
-            ep.num_ctx,
-            None,
-            ep.timeout_seconds,
-        ).await;
+        let response = self
+            .ollama_pool
+            .chat(
+                &ep.base_url,
+                &ep.model,
+                vec![serde_json::json!({"role": "user", "content": prompt})],
+                None,
+                ep.temperature,
+                ep.num_ctx,
+                None,
+                ep.timeout_seconds,
+            )
+            .await;
 
         match response {
             Some(body) => {
@@ -393,7 +409,9 @@ impl CodexJudge {
 
     /// Route a task and dispatch accordingly.
     fn parse_plan(&self, output: &str, goal: &str) -> Vec<SupervisorTask> {
-        let tasks: Vec<PlanTask> = if let Ok(wrapper) = serde_json::from_str::<PlanWrapper>(output.trim()) {
+        let tasks: Vec<PlanTask> = if let Ok(wrapper) =
+            serde_json::from_str::<PlanWrapper>(output.trim())
+        {
             wrapper.tasks
         } else {
             let json_str = extract_json_array(output);
@@ -462,7 +480,8 @@ impl SupervisorJudge for CodexJudge {
             0,
             &self.routing_config,
             &self.ollama_pool,
-        ).await;
+        )
+        .await;
 
         let output = match classification.route {
             // Simple goals: plan locally (free)
@@ -471,10 +490,14 @@ impl SupervisorJudge for CodexJudge {
             | codex_routing::classifier::RouteTarget::CloudFast => {
                 info!(route = ?classification.route, "Planning locally (simple goal)");
                 self.call_with_failover(
-                    &[&self.routing_config.reasoner, &self.routing_config.reasoner_backup],
+                    &[
+                        &self.routing_config.reasoner,
+                        &self.routing_config.reasoner_backup,
+                    ],
                     &prompt,
                     "planning",
-                ).await
+                )
+                .await
             }
             // Complex goals: plan with cloud (better decomposition)
             _ => {
@@ -528,11 +551,16 @@ impl SupervisorJudge for CodexJudge {
         );
 
         // Failover chain: reasoner → reasoner_backup → Codex sub-agent
-        let response = self.call_with_failover(
-            &[&self.routing_config.reasoner, &self.routing_config.reasoner_backup],
-            &prompt,
-            "evaluation",
-        ).await;
+        let response = self
+            .call_with_failover(
+                &[
+                    &self.routing_config.reasoner,
+                    &self.routing_config.reasoner_backup,
+                ],
+                &prompt,
+                "evaluation",
+            )
+            .await;
 
         match response {
             Ok(response) => {
@@ -655,11 +683,7 @@ fn strip_think_tags(text: &str) -> String {
 }
 
 fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        s
-    } else {
-        &s[..max_len]
-    }
+    if s.len() <= max_len { s } else { &s[..max_len] }
 }
 
 #[cfg(test)]

@@ -53,7 +53,11 @@ pub fn adapt_planning_prompt(goal: &str, target: RouteTarget) -> String {
 
 /// Adapt an evaluation prompt for the target model tier.
 pub fn adapt_evaluation_prompt(task_desc: &str, output: &str, target: RouteTarget) -> String {
-    let truncated_output = if output.len() > 2000 { &output[..2000] } else { output };
+    let truncated_output = if output.len() > 2000 {
+        &output[..2000]
+    } else {
+        output
+    };
 
     match target {
         RouteTarget::LightReasoner | RouteTarget::LightCoder => {

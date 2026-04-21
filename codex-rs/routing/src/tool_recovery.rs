@@ -104,7 +104,9 @@ fn try_parse_json_blob(content: &str) -> Option<JsonValue> {
         return None;
     }
 
-    serde_json::from_str::<JsonValue>(text).ok().filter(|v| v.is_object())
+    serde_json::from_str::<JsonValue>(text)
+        .ok()
+        .filter(|v| v.is_object())
 }
 
 /// Extract tool_calls from a parsed JSON blob.
@@ -114,11 +116,7 @@ fn extract_tool_calls_from_blob(blob: &JsonValue) -> Option<Vec<ToolCall>> {
         .iter()
         .filter_map(|tc| normalize_tool_call(tc))
         .collect();
-    if calls.is_empty() {
-        None
-    } else {
-        Some(calls)
-    }
+    if calls.is_empty() { None } else { Some(calls) }
 }
 
 /// Normalize a single tool call from various formats.
@@ -177,12 +175,12 @@ fn recover_embedded_tool_blocks(content: &str, streaming: bool) -> RecoveredMess
         let candidate = paragraph.trim();
 
         // Strip [USER]/[ASSISTANT] prefixes
-        let candidate = if candidate.starts_with("[USER]\n") || candidate.starts_with("[ASSISTANT]\n")
-        {
-            candidate.splitn(2, '\n').nth(1).unwrap_or("").trim()
-        } else {
-            candidate
-        };
+        let candidate =
+            if candidate.starts_with("[USER]\n") || candidate.starts_with("[ASSISTANT]\n") {
+                candidate.splitn(2, '\n').nth(1).unwrap_or("").trim()
+            } else {
+                candidate
+            };
 
         let parsed = try_parse_json_blob(candidate);
 
@@ -205,7 +203,10 @@ fn recover_embedded_tool_blocks(content: &str, streaming: bool) -> RecoveredMess
             Some(ref obj) if is_tool_result_block(obj) => {
                 // Drop tool_result blocks (echoed context)
             }
-            None if streaming && index == paragraphs.len() - 1 && looks_like_partial_tool_block(paragraph) => {
+            None if streaming
+                && index == paragraphs.len() - 1
+                && looks_like_partial_tool_block(paragraph) =>
+            {
                 // Streaming: drop partial tool blocks at the end
             }
             _ => {
@@ -241,7 +242,9 @@ fn looks_like_partial_tool_block(content: &str) -> bool {
         return false;
     }
     text.contains("\"type\"")
-        && (text.contains("tool_use") || text.contains("tool_result") || text.contains("tool_calls"))
+        && (text.contains("tool_use")
+            || text.contains("tool_result")
+            || text.contains("tool_calls"))
 }
 
 #[cfg(test)]
@@ -269,7 +272,10 @@ mod tests {
         assert_eq!(result.content, "thinking...");
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "shell");
-        assert_eq!(result.tool_calls[0].arguments, serde_json::json!({"cmd": "pwd"}));
+        assert_eq!(
+            result.tool_calls[0].arguments,
+            serde_json::json!({"cmd": "pwd"})
+        );
     }
 
     #[test]
@@ -338,7 +344,10 @@ mod tests {
     #[test]
     fn test_normalize_arguments_dict() {
         let args = serde_json::json!({"key": "value"});
-        assert_eq!(normalize_arguments(Some(&args)), serde_json::json!({"key": "value"}));
+        assert_eq!(
+            normalize_arguments(Some(&args)),
+            serde_json::json!({"key": "value"})
+        );
     }
 
     #[test]

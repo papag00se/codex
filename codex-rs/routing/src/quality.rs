@@ -26,8 +26,10 @@ pub fn check_response_quality(response_text: &str, prompt_text: &str) -> Option<
 
     // Response is a refusal or error from the model itself
     let lower = text.to_lowercase();
-    if lower.starts_with("i cannot") || lower.starts_with("i can't")
-        || lower.starts_with("i'm unable") || lower.starts_with("as an ai")
+    if lower.starts_with("i cannot")
+        || lower.starts_with("i can't")
+        || lower.starts_with("i'm unable")
+        || lower.starts_with("as an ai")
         || lower.starts_with("i don't have access")
     {
         return Some("model refusal detected".into());
@@ -35,7 +37,10 @@ pub fn check_response_quality(response_text: &str, prompt_text: &str) -> Option<
 
     // Response is just a code fence with nothing inside
     if text.starts_with("```") && text.ends_with("```") {
-        let inner = text.trim_start_matches("```").trim_end_matches("```").trim();
+        let inner = text
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
         // Allow code fences with actual content
         if inner.is_empty() || inner.lines().all(|l| l.trim().is_empty()) {
             return Some("empty code fence".into());
@@ -82,7 +87,10 @@ mod tests {
     #[test]
     fn test_refusal() {
         assert!(check_response_quality("I cannot help with that.", "How to X?").is_some());
-        assert!(check_response_quality("As an AI, I don't have opinions.", "What do you think?").is_some());
+        assert!(
+            check_response_quality("As an AI, I don't have opinions.", "What do you think?")
+                .is_some()
+        );
     }
 
     #[test]

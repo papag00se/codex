@@ -44,7 +44,10 @@ impl ClassifyCache {
 
         // Check if all recent entries are fresh
         let now = Instant::now();
-        let all_fresh = self.recent.iter().all(|e| now.duration_since(e.timestamp) < CACHE_TTL);
+        let all_fresh = self
+            .recent
+            .iter()
+            .all(|e| now.duration_since(e.timestamp) < CACHE_TTL);
         if !all_fresh {
             return None;
         }
@@ -61,7 +64,11 @@ impl ClassifyCache {
         Some(ClassifyResult {
             route: first_route,
             tools_potential,
-            reason: format!("cached — last {} requests all {:?}", self.recent.len(), first_route),
+            reason: format!(
+                "cached — last {} requests all {:?}",
+                self.recent.len(),
+                first_route
+            ),
         })
     }
 

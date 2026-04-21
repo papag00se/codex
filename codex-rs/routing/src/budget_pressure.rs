@@ -29,10 +29,8 @@ impl BudgetState {
             (primary_pct * 100.0) as u64, // Store as basis points for precision
             Ordering::Relaxed,
         );
-        self.secondary_used_pct.store(
-            (secondary_pct * 100.0) as u64,
-            Ordering::Relaxed,
-        );
+        self.secondary_used_pct
+            .store((secondary_pct * 100.0) as u64, Ordering::Relaxed);
         if let Some(reset) = primary_reset {
             self.primary_resets_at.store(reset, Ordering::Relaxed);
         }

@@ -89,7 +89,10 @@ pub async fn call_ollama_text(
                 .unwrap_or("")
                 .to_string();
 
-            let input_tokens = body.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let input_tokens = body
+                .get("prompt_eval_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let output_tokens = body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
 
             if content.is_empty() {

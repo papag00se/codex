@@ -6,6 +6,38 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 
+/// How many tools to expose to a local model on the LightCoder route.
+///
+/// `Focused` — a small curated set (~6) for models that lose attention on
+/// big tool catalogs. This is the default and what 9b-class models need.
+///
+/// `Full` — the entire Codex tool catalog (~120 schemas including MCP
+/// connectors and multi-agent orchestration). For larger local models
+/// (e.g. 30B+) that can navigate the full set without thrashing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolSubset {
+    Focused,
+    Full,
+}
+
+impl Default for ToolSubset {
+    fn default() -> Self {
+        Self::Focused
+    }
+}
+
+impl ToolSubset {
+    /// Parse from the `tool_subset` field in `.codex-multi/config.toml`.
+    /// Falls back to `Focused` for unknown values.
+    pub fn from_config_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "full" => Self::Full,
+            _ => Self::Focused,
+        }
+    }
+}
+
 /// A single Ollama endpoint + model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OllamaEndpoint {
@@ -15,6 +47,17 @@ pub struct OllamaEndpoint {
     pub temperature: f64,
     pub timeout_seconds: u64,
     pub enabled: bool,
+    /// Whether to enable Ollama's reasoning/`think` mode. Derived from the
+    /// model role's `reasoning` config (`"on"`/`"off"`); defaults to `false`.
+    /// Models that support thinking (qwen3.5, deepseek-r1, …) produce better
+    /// multi-step plans when this is on, at the cost of extra latency from
+    /// the thinking tokens.
+    #[serde(default)]
+    pub think: bool,
+    /// How many tools to expose. See [`ToolSubset`]. Derived from the role's
+    /// `tool_subset` config field; defaults to `Focused`.
+    #[serde(default)]
+    pub tool_subset: ToolSubset,
 }
 
 impl OllamaEndpoint {
@@ -26,6 +69,8 @@ impl OllamaEndpoint {
             temperature: 0.1,
             timeout_seconds: 300,
             enabled: true,
+            think: false,
+            tool_subset: ToolSubset::Focused,
         }
     }
 }
@@ -50,6 +95,10 @@ pub struct RoutingConfig {
     pub coder: OllamaRouteConfig,
 
     pub codex_cli_enabled: bool,
+
+    /// When true, never dispatch to cloud providers. See
+    /// `RoutingBehavior::local_only` in `project_config.rs`.
+    pub local_only: bool,
 }
 
 /// Configuration for the router model (the LLM that picks routes).
@@ -79,31 +128,47 @@ impl RoutingConfig {
         let classifier = OllamaEndpoint::from_env(
             "OLLAMA_CLASSIFIER_URL",
             "OLLAMA_CLASSIFIER_MODEL",
-            ("http://sakura-wsl.taile41496.ts.net:11434", "qwen3.5-9b:iq4_xs"),
+            (
+                "http://sakura-wsl.taile41496.ts.net:11434",
+                "qwen3.5-9b:iq4_xs",
+            ),
         );
 
-        let reasoner = OllamaEndpoint::from_env(
+        // Reasoner and coder default to thinking ON. The classifier and
+        // compactor stay off since they need fast deterministic output.
+        // Users can still override per-role via `.codex-multi/config.toml`'s
+        // `reasoning = "off"` field.
+        let mut reasoner = OllamaEndpoint::from_env(
             "OLLAMA_REASONER_URL",
             "OLLAMA_REASONER_MODEL",
             ("http://sakura-wsl.taile41496.ts.net:11435", "qwen3.5:9b"),
         );
+        reasoner.think = true;
 
-        let reasoner_backup = OllamaEndpoint::from_env(
+        let mut reasoner_backup = OllamaEndpoint::from_env(
             "OLLAMA_REASONER_BACKUP_URL",
             "OLLAMA_REASONER_BACKUP_MODEL",
             ("http://meru-wsl.taile41496.ts.net:11434", "qwen3.5:9b"),
         );
+        reasoner_backup.think = true;
 
-        let light_coder = OllamaEndpoint::from_env(
+        let mut light_coder = OllamaEndpoint::from_env(
             "OLLAMA_CODER_URL",
             "OLLAMA_CODER_MODEL",
-            ("http://sakura-wsl.taile41496.ts.net:11435", "qwen3.5-9b-opus-openclaw-distilled:tools"),
+            (
+                "http://sakura-wsl.taile41496.ts.net:11435",
+                "qwen3.5-9b-opus-openclaw-distilled:tools",
+            ),
         );
+        light_coder.think = true;
 
         let compactor = OllamaEndpoint::from_env(
             "OLLAMA_COMPACTOR_URL",
             "OLLAMA_COMPACTOR_MODEL",
-            ("http://sakura-wsl.taile41496.ts.net:11435", "qwen3.5-9b:iq4_xs"),
+            (
+                "http://sakura-wsl.taile41496.ts.net:11435",
+                "qwen3.5-9b:iq4_xs",
+            ),
         );
 
         Self {
@@ -132,6 +197,7 @@ impl RoutingConfig {
                 enabled: env_bool("ENABLE_LOCAL_CODER", true),
             },
             codex_cli_enabled: false,
+            local_only: env_bool("CODEX_LOCAL_ONLY", false),
         }
     }
 
@@ -139,6 +205,10 @@ impl RoutingConfig {
     /// Falls back to from_env() for any missing fields.
     pub fn from_project_config(pc: &crate::project_config::ProjectConfig) -> Self {
         let mut config = Self::from_env();
+
+        // Project config sets local_only; env var (already loaded into
+        // config.local_only by from_env) wins if true.
+        config.local_only = config.local_only || pc.routing.local_only;
 
         // Override from project config model roles
         if let Some(role) = pc.get_model("classifier") {
@@ -189,17 +259,25 @@ fn endpoint_from_role(role: &crate::project_config::ModelRole) -> Option<OllamaE
             model,
             reasoning,
             num_ctx,
+            tool_subset,
         } => {
             if provider != "ollama" {
                 return None; // Only Ollama endpoints can be used as local endpoints
             }
             Some(OllamaEndpoint {
-                base_url: endpoint.clone().unwrap_or_else(|| "http://127.0.0.1:11434".into()),
+                base_url: endpoint
+                    .clone()
+                    .unwrap_or_else(|| "http://127.0.0.1:11434".into()),
                 model: model.clone(),
                 num_ctx: num_ctx.unwrap_or(8192),
                 temperature: if reasoning == "off" { 0.0 } else { 0.1 },
                 timeout_seconds: 300,
                 enabled: true,
+                think: reasoning != "off",
+                tool_subset: tool_subset
+                    .as_deref()
+                    .map(ToolSubset::from_config_str)
+                    .unwrap_or_default(),
             })
         }
         crate::project_config::ModelRole::Weighted { .. } => {
@@ -221,7 +299,12 @@ fn env_or(name: &str, default: &str) -> String {
 
 fn env_bool(name: &str, default: bool) -> bool {
     env::var(name)
-        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(default)
 }
 

@@ -54,13 +54,19 @@ impl UsageTracker {
     /// `pre_strip_tokens` is the estimated token count of the full conversation
     /// before context stripping — what the cloud model would have received.
     pub fn record_savings(&self, pre_strip_tokens: u64) {
-        let mut saved = self.cloud_tokens_saved.lock().unwrap_or_else(|e| e.into_inner());
+        let mut saved = self
+            .cloud_tokens_saved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *saved += pre_strip_tokens;
     }
 
     /// Get total estimated cloud tokens saved.
     pub fn cloud_tokens_saved(&self) -> u64 {
-        *self.cloud_tokens_saved.lock().unwrap_or_else(|e| e.into_inner())
+        *self
+            .cloud_tokens_saved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get usage for a specific model.
@@ -138,9 +144,12 @@ impl UsageTracker {
              \n\
              Cloud tokens saved: ~{}\n\
              Local routing rate: {:.0}% of requests",
-            local.request_count, local.total_tokens(),
-            secondary.request_count, secondary.total_tokens(),
-            primary.request_count, primary.total_tokens(),
+            local.request_count,
+            local.total_tokens(),
+            secondary.request_count,
+            secondary.total_tokens(),
+            primary.request_count,
+            primary.total_tokens(),
             saved,
             local_pct,
         )

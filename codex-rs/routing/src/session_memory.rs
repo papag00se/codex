@@ -21,7 +21,7 @@ pub struct SessionMemory {
     pub session_id: String,
     pub timestamp: u64,
     pub goal: String,
-    pub outcome: String,  // "completed", "failed", "partial"
+    pub outcome: String, // "completed", "failed", "partial"
     pub task_state: String,
     pub decisions: Vec<String>,
     pub failures_to_avoid: Vec<String>,
@@ -37,9 +37,7 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     pub fn new(project_dir: &Path) -> Self {
-        let memory_dir = project_dir
-            .join(".codex-multi")
-            .join(MEMORY_DIR);
+        let memory_dir = project_dir.join(".codex-multi").join(MEMORY_DIR);
         Self { memory_dir }
     }
 

@@ -21,7 +21,9 @@ pub fn merge_states(states: &[ChunkExtraction]) -> MergedState {
         accepted_fixes: merge_unique(states.iter().map(|s| s.accepted_fixes.as_slice())),
         rejected_ideas: merge_unique(states.iter().map(|s| s.rejected_ideas.as_slice())),
         constraints: merge_unique(states.iter().map(|s| s.constraints.as_slice())),
-        environment_assumptions: merge_unique(states.iter().map(|s| s.environment_assumptions.as_slice())),
+        environment_assumptions: merge_unique(
+            states.iter().map(|s| s.environment_assumptions.as_slice()),
+        ),
         pending_todos: merge_unique(states.iter().map(|s| s.pending_todos.as_slice())),
         unresolved_bugs: merge_unique(states.iter().map(|s| s.unresolved_bugs.as_slice())),
         test_status: merge_unique(states.iter().map(|s| s.test_status.as_slice())),
@@ -54,7 +56,9 @@ fn latest_non_empty_list<'a>(values: impl Iterator<Item = &'a [String]>) -> Vec<
 }
 
 /// Shallow dict merge — later values overwrite.
-fn merge_repo_state<'a>(values: impl Iterator<Item = &'a HashMap<String, String>>) -> HashMap<String, String> {
+fn merge_repo_state<'a>(
+    values: impl Iterator<Item = &'a HashMap<String, String>>,
+) -> HashMap<String, String> {
     let mut merged = HashMap::new();
     for v in values {
         for (k, val) in v {
@@ -119,7 +123,11 @@ mod tests {
             ..Default::default()
         };
         let s2 = ChunkExtraction {
-            repo_state: [("branch".into(), "feature".into()), ("db".into(), "pg".into())].into(),
+            repo_state: [
+                ("branch".into(), "feature".into()),
+                ("db".into(), "pg".into()),
+            ]
+            .into(),
             ..Default::default()
         };
         let merged = merge_states(&[s1, s2]);
@@ -138,7 +146,11 @@ mod tests {
             ..Default::default()
         };
         let merged = merge_states(&[s1, s2]);
-        let lower: Vec<String> = merged.files_touched.iter().map(|f| f.to_lowercase()).collect();
+        let lower: Vec<String> = merged
+            .files_touched
+            .iter()
+            .map(|f| f.to_lowercase())
+            .collect();
         assert_eq!(lower.iter().filter(|f| f.as_str() == "auth.py").count(), 1);
     }
 }

@@ -44,6 +44,11 @@ pub enum ModelRole {
         reasoning: String,
         #[serde(default)]
         num_ctx: Option<usize>,
+        /// `"focused"` (default, ~6 tools) or `"full"` (entire catalog).
+        /// Override per-model when the local model can handle a larger
+        /// catalog without losing focus.
+        #[serde(default)]
+        tool_subset: Option<String>,
     },
     Weighted {
         entries: Vec<ModelEntry>,
@@ -57,6 +62,14 @@ pub struct RoutingBehavior {
     pub strategy: String,
     #[serde(default)]
     pub compaction_model: Option<String>,
+    /// When true, never dispatch to a cloud provider. Cloud classifier routes
+    /// are remapped to local equivalents and cloud roles are stripped from
+    /// failover chains. If no local model can serve the request, an error is
+    /// surfaced to the user instead of silently falling back to cloud.
+    /// Can also be enabled via the `CODEX_LOCAL_ONLY` env var or the
+    /// `--local-only` CLI flag.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 impl Default for RoutingBehavior {
@@ -64,6 +77,7 @@ impl Default for RoutingBehavior {
         Self {
             strategy: default_strategy(),
             compaction_model: None,
+            local_only: false,
         }
     }
 }
@@ -164,11 +178,21 @@ pub struct FailoverBehavior {
     pub timeout_ms: u64,
 }
 
-fn default_fo_retry_attempts() -> u32 { 2 }
-fn default_fo_backoff() -> u64 { 1000 }
-fn default_fo_rate_limit_wait() -> u64 { 5000 }
-fn default_fo_rate_limit_max() -> u64 { 30000 }
-fn default_fo_timeout() -> u64 { 30000 }
+fn default_fo_retry_attempts() -> u32 {
+    2
+}
+fn default_fo_backoff() -> u64 {
+    1000
+}
+fn default_fo_rate_limit_wait() -> u64 {
+    5000
+}
+fn default_fo_rate_limit_max() -> u64 {
+    30000
+}
+fn default_fo_timeout() -> u64 {
+    30000
+}
 
 impl Default for FailoverBehavior {
     fn default() -> Self {
@@ -214,6 +238,32 @@ pub struct AgentRole {
     pub instructions: String,
 }
 
+/// Configuration for the `local_web_search` tool (Brave Search backend).
+///
+/// When `brave_api_key` is empty (or the section is missing), the tool is
+/// considered disabled — calls return an error message instead of hitting
+/// the network.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SearchConfig {
+    /// Brave Search API subscription token. Empty string means the tool is
+    /// disabled. Drop the value into `.codex-multi/config.toml` directly:
+    ///
+    /// ```toml
+    /// [search]
+    /// brave_api_key = "BSAxxxxxxxxxxx"
+    /// ```
+    #[serde(default)]
+    pub brave_api_key: String,
+
+    /// Number of results per query, clamped to the Brave API limit of 1-20.
+    #[serde(default = "default_results_per_query")]
+    pub results_per_query: usize,
+}
+
+fn default_results_per_query() -> usize {
+    10
+}
+
 /// CLI binary paths for external provider dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliBinaries {
@@ -251,6 +301,8 @@ pub struct ProjectConfig {
     pub usage: UsageConfig,
     #[serde(default)]
     pub cli: CliBinaries,
+    #[serde(default)]
+    pub search: SearchConfig,
 }
 
 impl ProjectConfig {
@@ -306,6 +358,15 @@ impl ProjectConfig {
             _ => &[],
         }
     }
+}
+
+/// Returns true if a role name refers to a cloud-dispatched role.
+/// Used by local_only mode to strip cloud entries from failover chains.
+pub fn is_cloud_role(role: &str) -> bool {
+    matches!(
+        role,
+        "cloud_fast" | "cloud_mini" | "cloud_reasoner" | "cloud_coder"
+    )
 }
 
 #[cfg(test)]
@@ -406,5 +467,34 @@ prefer_secondary = true
     fn test_load_nonexistent() {
         let config = ProjectConfig::load(Path::new("/nonexistent/path"));
         assert_eq!(config.supervisor.max_iterations, 50); // defaults
+    }
+
+    #[test]
+    fn test_local_only_default_off() {
+        let config = ProjectConfig::default();
+        assert!(!config.routing.local_only);
+    }
+
+    #[test]
+    fn test_local_only_parsed_from_toml() {
+        let toml = r#"
+[routing]
+local_only = true
+"#;
+        let config: ProjectConfig = toml::from_str(toml).unwrap();
+        assert!(config.routing.local_only);
+    }
+
+    #[test]
+    fn test_is_cloud_role_classification() {
+        assert!(is_cloud_role("cloud_fast"));
+        assert!(is_cloud_role("cloud_mini"));
+        assert!(is_cloud_role("cloud_reasoner"));
+        assert!(is_cloud_role("cloud_coder"));
+        assert!(!is_cloud_role("light_coder"));
+        assert!(!is_cloud_role("light_reasoner"));
+        assert!(!is_cloud_role("light_reasoner_backup"));
+        assert!(!is_cloud_role("compactor"));
+        assert!(!is_cloud_role("classifier"));
     }
 }

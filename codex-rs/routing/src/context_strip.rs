@@ -54,14 +54,21 @@ pub fn strip_context(
 
     // Step 1: Determine how many recent turns to keep
     let keep_turns = match level {
-        StripLevel::Coder => 6,   // Last 3 exchanges
+        StripLevel::Coder => 6,    // Last 3 exchanges
         StripLevel::Reasoner => 4, // Last 2 exchanges
     };
 
     // Step 2: Take only recent messages
     let recent: Vec<&JsonValue> = if messages.len() > keep_turns {
         removed_count += messages.len() - keep_turns;
-        messages.iter().rev().take(keep_turns).collect::<Vec<_>>().into_iter().rev().collect()
+        messages
+            .iter()
+            .rev()
+            .take(keep_turns)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     } else {
         messages.iter().collect()
     };
@@ -134,19 +141,19 @@ pub fn strip_context(
 
     // Step 5: Minimal system prompt
     let minimal_system = match level {
-        StripLevel::Coder => {
-            system.map(|s| truncate_system_prompt(s, 500))
-                .or(Some("You are a coding assistant. Complete the requested task.".into()))
-        }
-        StripLevel::Reasoner => {
-            Some("Answer concisely and directly.".into())
-        }
+        StripLevel::Coder => system.map(|s| truncate_system_prompt(s, 500)).or(Some(
+            "You are a coding assistant. Complete the requested task.".into(),
+        )),
+        StripLevel::Reasoner => Some("Answer concisely and directly.".into()),
     };
 
     let strip_summary = format!(
         "stripped: {} messages removed, {} truncated, {} polls collapsed (kept {}/{})",
-        removed_count, truncated_count, collapsed_polls,
-        stripped.len(), original_count,
+        removed_count,
+        truncated_count,
+        collapsed_polls,
+        stripped.len(),
+        original_count,
     );
 
     StrippedContext {
@@ -199,10 +206,11 @@ fn is_poll_message(content: &str) -> bool {
 /// Remove tool responses except the last one.
 fn strip_tool_responses(messages: &mut Vec<JsonValue>) {
     // Find the last tool response
-    let last_tool_idx = messages.iter().enumerate().rev()
-        .find(|(_, m)| {
-            m.get("role").and_then(|r| r.as_str()) == Some("tool")
-        })
+    let last_tool_idx = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, m)| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
         .map(|(i, _)| i);
 
     // Remove all tool responses except the last
@@ -220,9 +228,14 @@ fn strip_tool_responses(messages: &mut Vec<JsonValue>) {
 /// Remove base64-encoded data from content.
 fn remove_base64_blobs(content: &str) -> String {
     // Simple heuristic: lines that are >100 chars of only base64 characters
-    content.lines()
+    content
+        .lines()
         .map(|line| {
-            if line.len() > 100 && line.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+            if line.len() > 100
+                && line
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+            {
                 "[binary data removed]"
             } else {
                 line
@@ -249,7 +262,8 @@ fn remove_think_blocks(content: &str) -> String {
 /// Remove encrypted_content JSON fields.
 fn remove_encrypted_content(content: &str) -> String {
     // Simple: remove lines containing "encrypted_content"
-    content.lines()
+    content
+        .lines()
         .filter(|line| !line.contains("encrypted_content"))
         .collect::<Vec<_>>()
         .join("\n")
@@ -276,7 +290,10 @@ pub fn summarize_affected_files(messages: &[JsonValue]) -> Vec<String> {
             let trimmed = line.trim();
             // File paths in diffs
             if trimmed.starts_with("+++ ") || trimmed.starts_with("--- ") {
-                let path = trimmed[4..].trim().trim_start_matches("a/").trim_start_matches("b/");
+                let path = trimmed[4..]
+                    .trim()
+                    .trim_start_matches("a/")
+                    .trim_start_matches("b/");
                 if !path.is_empty() && path != "/dev/null" {
                     files.insert(path.to_string());
                 }
@@ -306,7 +323,8 @@ pub fn summarize_tool_calls(messages: &[JsonValue]) -> String {
     for msg in messages {
         if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
             for tc in tool_calls {
-                let name = tc.get("function")
+                let name = tc
+                    .get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
@@ -321,10 +339,18 @@ pub fn summarize_tool_calls(messages: &[JsonValue]) -> String {
     }
 
     let mut parts = Vec::new();
-    if shell_count > 0 { parts.push(format!("{shell_count} shell commands")); }
-    if edit_count > 0 { parts.push(format!("{edit_count} file edits")); }
-    if read_count > 0 { parts.push(format!("{read_count} file reads")); }
-    if other_count > 0 { parts.push(format!("{other_count} other tool calls")); }
+    if shell_count > 0 {
+        parts.push(format!("{shell_count} shell commands"));
+    }
+    if edit_count > 0 {
+        parts.push(format!("{edit_count} file edits"));
+    }
+    if read_count > 0 {
+        parts.push(format!("{read_count} file reads"));
+    }
+    if other_count > 0 {
+        parts.push(format!("{other_count} other tool calls"));
+    }
 
     if parts.is_empty() {
         "no tool calls".into()
@@ -355,7 +381,10 @@ mod tests {
         let result = strip_context(&messages, None, StripLevel::Reasoner);
         // Should keep only last 4 messages
         assert!(result.messages.len() <= 4);
-        assert_eq!(result.system.as_deref(), Some("Answer concisely and directly."));
+        assert_eq!(
+            result.system.as_deref(),
+            Some("Answer concisely and directly.")
+        );
     }
 
     #[test]
@@ -401,9 +430,12 @@ mod tests {
         ];
         let result = strip_context(&messages, None, StripLevel::Coder);
         // 4 polls should collapse to 1 summary
-        let poll_msgs: Vec<_> = result.messages.iter()
+        let poll_msgs: Vec<_> = result
+            .messages
+            .iter()
             .filter(|m| {
-                m.get("content").and_then(|c| c.as_str())
+                m.get("content")
+                    .and_then(|c| c.as_str())
                     .map(|s| s.contains("polled"))
                     .unwrap_or(false)
             })
@@ -418,23 +450,25 @@ mod tests {
         let messages = vec![msg("user", &long)];
         let result = strip_context(&messages, None, StripLevel::Reasoner);
         let content = result.messages[0].get("content").unwrap().as_str().unwrap();
-        assert!(content.len() < 3000, "Content too long: {} chars", content.len());
+        assert!(
+            content.len() < 3000,
+            "Content too long: {} chars",
+            content.len()
+        );
         assert!(content.contains("[truncated"), "Missing truncation marker");
     }
 
     #[test]
     fn test_summarize_tool_calls() {
-        let messages = vec![
-            serde_json::json!({
-                "role": "assistant",
-                "tool_calls": [
-                    {"function": {"name": "shell", "arguments": {}}},
-                    {"function": {"name": "shell", "arguments": {}}},
-                    {"function": {"name": "apply_patch", "arguments": {}}},
-                    {"function": {"name": "read_file", "arguments": {}}},
-                ]
-            }),
-        ];
+        let messages = vec![serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "shell", "arguments": {}}},
+                {"function": {"name": "shell", "arguments": {}}},
+                {"function": {"name": "apply_patch", "arguments": {}}},
+                {"function": {"name": "read_file", "arguments": {}}},
+            ]
+        })];
         let summary = summarize_tool_calls(&messages);
         assert!(summary.contains("2 shell commands"));
         assert!(summary.contains("1 file edit"));
@@ -443,9 +477,10 @@ mod tests {
 
     #[test]
     fn test_summarize_affected_files() {
-        let messages = vec![
-            msg("assistant", "+++ b/src/auth.py\n--- a/src/auth.py\nM tests/test_auth.py"),
-        ];
+        let messages = vec![msg(
+            "assistant",
+            "+++ b/src/auth.py\n--- a/src/auth.py\nM tests/test_auth.py",
+        )];
         let files = summarize_affected_files(&messages);
         assert!(files.contains(&"src/auth.py".to_string()));
     }

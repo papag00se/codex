@@ -7719,7 +7719,8 @@ async fn try_run_sampling_request(
                             &turn_context.model_info.slug,
                             usage.input_tokens as u64,
                             usage.output_tokens as u64,
-                        ).await;
+                        )
+                        .await;
                     }
                 }
 

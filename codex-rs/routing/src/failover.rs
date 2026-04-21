@@ -6,7 +6,7 @@
 //! Deterministic control flow with no LLM involvement.
 //! See docs/spec/design-principles.md.
 
-use crate::project_config::{FailoverBehavior, FailoverChains, ProjectConfig, ModelRole};
+use crate::project_config::{FailoverBehavior, FailoverChains, ModelRole, ProjectConfig};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -36,23 +36,13 @@ pub enum FailureType {
 #[derive(Debug, Clone)]
 pub enum FailoverAction {
     /// Retry the same model after waiting.
-    RetrySame {
-        wait: Duration,
-        attempt: u32,
-    },
+    RetrySame { wait: Duration, attempt: u32 },
     /// Try the next model in the failover chain.
-    NextInChain {
-        model_role: String,
-        reason: String,
-    },
+    NextInChain { model_role: String, reason: String },
     /// Hard failure — don't retry.
-    HardFail {
-        reason: String,
-    },
+    HardFail { reason: String },
     /// Chain exhausted — all models tried and failed.
-    ChainExhausted {
-        chain_name: String,
-    },
+    ChainExhausted { chain_name: String },
 }
 
 /// Classify an HTTP status code + error info into a FailureType.
@@ -72,7 +62,10 @@ pub fn classify_failure(
     match status_code {
         Some(429) => {
             let lower = error_message.to_lowercase();
-            if lower.contains("quota") || lower.contains("insufficient") || lower.contains("usage limit") {
+            if lower.contains("quota")
+                || lower.contains("insufficient")
+                || lower.contains("usage limit")
+            {
                 FailureType::QuotaExhausted
             } else {
                 FailureType::RateLimit
@@ -137,17 +130,19 @@ pub fn decide_action(
                     attempt: attempt + 1,
                 }
             } else {
-                walk_chain(current_model_role, chain_name, chain, "rate limit retries exhausted")
+                walk_chain(
+                    current_model_role,
+                    chain_name,
+                    chain,
+                    "rate limit retries exhausted",
+                )
             }
         }
 
         // F6: Timeout — retry once, then walk chain
         FailureType::Timeout => {
             if attempt < 1 {
-                info!(
-                    model = current_model_role,
-                    "Timeout — retrying once"
-                );
+                info!(model = current_model_role, "Timeout — retrying once");
                 FailoverAction::RetrySame {
                     wait: Duration::from_millis(behavior.retry_same_backoff_ms),
                     attempt: attempt + 1,
@@ -166,14 +161,25 @@ pub fn decide_action(
         }
         FailureType::ModelNotFound => {
             warn!(model = current_model_role, "Model not found — check config");
-            walk_chain(current_model_role, chain_name, chain, "model not found (config error?)")
+            walk_chain(
+                current_model_role,
+                chain_name,
+                chain,
+                "model not found (config error?)",
+            )
         }
-        FailureType::QualityFailure => {
-            walk_chain(current_model_role, chain_name, chain, "quality check failed")
-        }
-        FailureType::ContextOverflow => {
-            walk_chain(current_model_role, chain_name, chain, "context overflow — need larger model")
-        }
+        FailureType::QualityFailure => walk_chain(
+            current_model_role,
+            chain_name,
+            chain,
+            "quality check failed",
+        ),
+        FailureType::ContextOverflow => walk_chain(
+            current_model_role,
+            chain_name,
+            chain,
+            "context overflow — need larger model",
+        ),
     }
 }
 
@@ -319,8 +325,12 @@ mod tests {
     fn test_auth_hard_fails() {
         let action = decide_action(
             FailureType::AuthFailure,
-            "cloud_coder", "reasoning", &test_chain(),
-            0, None, &default_behavior(),
+            "cloud_coder",
+            "reasoning",
+            &test_chain(),
+            0,
+            None,
+            &default_behavior(),
         );
         assert!(matches!(action, FailoverAction::HardFail { .. }));
     }
@@ -331,15 +341,39 @@ mod tests {
         let b = default_behavior();
 
         // First failure: retry same
-        let a1 = decide_action(FailureType::RateLimit, "light_reasoner", "reasoning", &chain, 0, None, &b);
+        let a1 = decide_action(
+            FailureType::RateLimit,
+            "light_reasoner",
+            "reasoning",
+            &chain,
+            0,
+            None,
+            &b,
+        );
         assert!(matches!(a1, FailoverAction::RetrySame { .. }));
 
         // Second failure: retry same (attempt < 2)
-        let a2 = decide_action(FailureType::RateLimit, "light_reasoner", "reasoning", &chain, 1, None, &b);
+        let a2 = decide_action(
+            FailureType::RateLimit,
+            "light_reasoner",
+            "reasoning",
+            &chain,
+            1,
+            None,
+            &b,
+        );
         assert!(matches!(a2, FailoverAction::RetrySame { .. }));
 
         // Third failure: walk chain (attempt >= 2)
-        let a3 = decide_action(FailureType::RateLimit, "light_reasoner", "reasoning", &chain, 2, None, &b);
+        let a3 = decide_action(
+            FailureType::RateLimit,
+            "light_reasoner",
+            "reasoning",
+            &chain,
+            2,
+            None,
+            &b,
+        );
         match a3 {
             FailoverAction::NextInChain { model_role, .. } => {
                 assert_eq!(model_role, "light_reasoner_backup");
@@ -353,10 +387,26 @@ mod tests {
         let chain = test_chain();
         let b = default_behavior();
 
-        let a1 = decide_action(FailureType::Timeout, "cloud_reasoner", "reasoning", &chain, 0, None, &b);
+        let a1 = decide_action(
+            FailureType::Timeout,
+            "cloud_reasoner",
+            "reasoning",
+            &chain,
+            0,
+            None,
+            &b,
+        );
         assert!(matches!(a1, FailoverAction::RetrySame { .. }));
 
-        let a2 = decide_action(FailureType::Timeout, "cloud_reasoner", "reasoning", &chain, 1, None, &b);
+        let a2 = decide_action(
+            FailureType::Timeout,
+            "cloud_reasoner",
+            "reasoning",
+            &chain,
+            1,
+            None,
+            &b,
+        );
         match a2 {
             FailoverAction::NextInChain { model_role, .. } => {
                 assert_eq!(model_role, "cloud_coder");
@@ -370,7 +420,15 @@ mod tests {
         let chain = test_chain();
         let b = default_behavior();
 
-        let action = decide_action(FailureType::QualityFailure, "light_reasoner", "reasoning", &chain, 0, None, &b);
+        let action = decide_action(
+            FailureType::QualityFailure,
+            "light_reasoner",
+            "reasoning",
+            &chain,
+            0,
+            None,
+            &b,
+        );
         match action {
             FailoverAction::NextInChain { model_role, .. } => {
                 assert_eq!(model_role, "light_reasoner_backup");
@@ -385,7 +443,15 @@ mod tests {
         let b = default_behavior();
 
         // Last model in chain fails
-        let action = decide_action(FailureType::ModelUnavailable, "cloud_coder", "reasoning", &chain, 0, None, &b);
+        let action = decide_action(
+            FailureType::ModelUnavailable,
+            "cloud_coder",
+            "reasoning",
+            &chain,
+            0,
+            None,
+            &b,
+        );
         assert!(matches!(action, FailoverAction::ChainExhausted { .. }));
     }
 
@@ -394,7 +460,15 @@ mod tests {
         let chain = test_chain();
         let b = default_behavior();
 
-        let action = decide_action(FailureType::RateLimit, "light_reasoner", "reasoning", &chain, 0, Some(2000), &b);
+        let action = decide_action(
+            FailureType::RateLimit,
+            "light_reasoner",
+            "reasoning",
+            &chain,
+            0,
+            Some(2000),
+            &b,
+        );
         match action {
             FailoverAction::RetrySame { wait, .. } => {
                 assert_eq!(wait, Duration::from_millis(2000));
@@ -409,7 +483,15 @@ mod tests {
         let b = default_behavior();
 
         // retry-after says 60s, but max is 30s
-        let action = decide_action(FailureType::RateLimit, "light_reasoner", "reasoning", &chain, 0, Some(60000), &b);
+        let action = decide_action(
+            FailureType::RateLimit,
+            "light_reasoner",
+            "reasoning",
+            &chain,
+            0,
+            Some(60000),
+            &b,
+        );
         match action {
             FailoverAction::RetrySame { wait, .. } => {
                 assert_eq!(wait, Duration::from_millis(30000));
@@ -423,7 +505,15 @@ mod tests {
         let chain = test_chain();
         let b = default_behavior();
 
-        let action = decide_action(FailureType::ModelUnavailable, "unknown_model", "reasoning", &chain, 0, None, &b);
+        let action = decide_action(
+            FailureType::ModelUnavailable,
+            "unknown_model",
+            "reasoning",
+            &chain,
+            0,
+            None,
+            &b,
+        );
         match action {
             FailoverAction::NextInChain { model_role, .. } => {
                 assert_eq!(model_role, "light_reasoner"); // First in chain

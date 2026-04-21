@@ -19,16 +19,14 @@ pub struct CodebaseContext {
     pub build_tools: Vec<String>,
     pub has_docker: bool,
     pub has_ci: bool,
-    pub estimated_complexity: String,  // "small", "medium", "large"
+    pub estimated_complexity: String, // "small", "medium", "large"
 }
 
 impl CodebaseContext {
     /// Detect codebase context from the working directory.
     /// Uses cache if available and fresh (< 1 hour).
     pub fn detect(project_dir: &Path) -> Self {
-        let cache_path = project_dir
-            .join(".codex-multi")
-            .join("context_cache.json");
+        let cache_path = project_dir.join(".codex-multi").join("context_cache.json");
 
         // Check cache freshness
         if let Ok(metadata) = std::fs::metadata(&cache_path) {
@@ -92,17 +90,41 @@ fn scan_directory(dir: &Path) -> CodebaseContext {
     let mut has_ci = false;
 
     // Walk the directory (max depth 4 to avoid huge repos)
-    scan_recursive(dir, &mut extensions, &mut file_count, &mut test_frameworks,
-                   &mut build_tools, &mut has_docker, &mut has_ci, 0, 4);
+    scan_recursive(
+        dir,
+        &mut extensions,
+        &mut file_count,
+        &mut test_frameworks,
+        &mut build_tools,
+        &mut has_docker,
+        &mut has_ci,
+        0,
+        4,
+    );
 
     // Map extensions to language names
     let ext_to_lang: HashMap<&str, &str> = HashMap::from([
-        ("py", "Python"), ("js", "JavaScript"), ("ts", "TypeScript"),
-        ("tsx", "TypeScript"), ("jsx", "JavaScript"), ("rs", "Rust"),
-        ("go", "Go"), ("java", "Java"), ("rb", "Ruby"), ("php", "PHP"),
-        ("cpp", "C++"), ("c", "C"), ("cs", "C#"), ("swift", "Swift"),
-        ("kt", "Kotlin"), ("sql", "SQL"), ("sh", "Shell"),
-        ("html", "HTML"), ("css", "CSS"), ("vue", "Vue"), ("svelte", "Svelte"),
+        ("py", "Python"),
+        ("js", "JavaScript"),
+        ("ts", "TypeScript"),
+        ("tsx", "TypeScript"),
+        ("jsx", "JavaScript"),
+        ("rs", "Rust"),
+        ("go", "Go"),
+        ("java", "Java"),
+        ("rb", "Ruby"),
+        ("php", "PHP"),
+        ("cpp", "C++"),
+        ("c", "C"),
+        ("cs", "C#"),
+        ("swift", "Swift"),
+        ("kt", "Kotlin"),
+        ("sql", "SQL"),
+        ("sh", "Shell"),
+        ("html", "HTML"),
+        ("css", "CSS"),
+        ("vue", "Vue"),
+        ("svelte", "Svelte"),
     ]);
 
     let mut lang_counts: HashMap<String, usize> = HashMap::new();
@@ -163,17 +185,29 @@ fn scan_recursive(
         let name = entry.file_name().to_string_lossy().to_string();
 
         // Skip hidden dirs and common non-source dirs
-        if name.starts_with('.') || name == "node_modules" || name == "target"
-            || name == "__pycache__" || name == "venv" || name == ".venv"
-            || name == "dist" || name == "build"
+        if name.starts_with('.')
+            || name == "node_modules"
+            || name == "target"
+            || name == "__pycache__"
+            || name == "venv"
+            || name == ".venv"
+            || name == "dist"
+            || name == "build"
         {
             continue;
         }
 
         if path.is_dir() {
             scan_recursive(
-                &path, extensions, file_count, test_frameworks,
-                build_tools, has_docker, has_ci, depth + 1, max_depth,
+                &path,
+                extensions,
+                file_count,
+                test_frameworks,
+                build_tools,
+                has_docker,
+                has_ci,
+                depth + 1,
+                max_depth,
             );
             continue;
         }
@@ -236,7 +270,10 @@ fn scan_recursive(
         }
 
         // Detect Docker and CI
-        if name.starts_with("Dockerfile") || name == "docker-compose.yml" || name == "docker-compose.yaml" {
+        if name.starts_with("Dockerfile")
+            || name == "docker-compose.yml"
+            || name == "docker-compose.yaml"
+        {
             *has_docker = true;
         }
         if name == ".github" || name == ".gitlab-ci.yml" || name == "Jenkinsfile" {

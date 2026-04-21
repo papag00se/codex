@@ -24,7 +24,10 @@ pub fn normalize_transcript(items: &[JsonValue], max_item_tokens: usize) -> Norm
     let sanitized: Vec<Option<JsonValue>> = items.iter().map(sanitize_item).collect();
 
     // Find the last non-None item — preserve it raw
-    let last_idx = sanitized.iter().enumerate().rev()
+    let last_idx = sanitized
+        .iter()
+        .enumerate()
+        .rev()
         .find(|(_, item)| item.is_some())
         .map(|(i, _)| i);
 
@@ -40,9 +43,8 @@ pub fn normalize_transcript(items: &[JsonValue], max_item_tokens: usize) -> Norm
             precompacted.push(item);
         } else {
             // Check size — skip oversized items
-            let item_tokens = crate::metrics::estimate_tokens(
-                &serde_json::to_string(&item).unwrap_or_default()
-            );
+            let item_tokens =
+                crate::metrics::estimate_tokens(&serde_json::to_string(&item).unwrap_or_default());
             if item_tokens <= max_item_tokens {
                 compactable.push(item);
             }
@@ -68,7 +70,8 @@ fn sanitize_item(item: &JsonValue) -> Option<JsonValue> {
         }
         if let Some(content) = value.as_array() {
             // Filter content blocks
-            let filtered: Vec<JsonValue> = content.iter()
+            let filtered: Vec<JsonValue> = content
+                .iter()
                 .filter_map(|block| sanitize_block(block))
                 .collect();
             if filtered.is_empty() {
@@ -116,15 +119,14 @@ fn sanitize_block(block: &JsonValue) -> Option<JsonValue> {
 fn strip_encrypted(value: &JsonValue) -> JsonValue {
     match value {
         JsonValue::Object(obj) => {
-            let clean: serde_json::Map<String, JsonValue> = obj.iter()
+            let clean: serde_json::Map<String, JsonValue> = obj
+                .iter()
                 .filter(|(k, _)| k.as_str() != "encrypted_content")
                 .map(|(k, v)| (k.clone(), strip_encrypted(v)))
                 .collect();
             JsonValue::Object(clean)
         }
-        JsonValue::Array(arr) => {
-            JsonValue::Array(arr.iter().map(strip_encrypted).collect())
-        }
+        JsonValue::Array(arr) => JsonValue::Array(arr.iter().map(strip_encrypted).collect()),
         other => other.clone(),
     }
 }

@@ -79,10 +79,27 @@ impl OllamaClientPool {
         response_format: Option<&str>,
         timeout_seconds: u64,
     ) -> Option<JsonValue> {
-        self.chat_with_tools(base_url, model, messages, system, temperature, num_ctx, response_format, timeout_seconds, None).await
+        self.chat_with_tools(
+            base_url,
+            model,
+            messages,
+            system,
+            temperature,
+            num_ctx,
+            response_format,
+            timeout_seconds,
+            None,
+            /*think=*/ false,
+        )
+        .await
     }
 
     /// Call Ollama's /api/chat endpoint with optional tools and serialization.
+    ///
+    /// `think` controls Ollama's reasoning mode. Pass `false` for utility
+    /// calls (router, classifier) where reasoning tokens add latency without
+    /// improving the structured output. Pass `true` for execution calls where
+    /// the model benefits from planning before answering.
     pub async fn chat_with_tools(
         &self,
         base_url: &str,
@@ -94,16 +111,14 @@ impl OllamaClientPool {
         response_format: Option<&str>,
         timeout_seconds: u64,
         tools: Option<Vec<JsonValue>>,
+        think: bool,
     ) -> Option<JsonValue> {
         let sem = self.semaphore_for(base_url).await;
         let _permit = sem.acquire().await.ok()?;
 
         let mut payload_messages = messages;
         if let Some(sys) = system {
-            payload_messages.insert(
-                0,
-                serde_json::json!({"role": "system", "content": sys}),
-            );
+            payload_messages.insert(0, serde_json::json!({"role": "system", "content": sys}));
         }
 
         let mut payload = serde_json::json!({
@@ -124,8 +139,7 @@ impl OllamaClientPool {
             payload["tools"] = serde_json::json!(tools);
         }
 
-        // Disable thinking for router calls
-        payload["think"] = serde_json::json!(false);
+        payload["think"] = serde_json::json!(think);
 
         let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
         let result = self
@@ -165,16 +179,14 @@ impl OllamaClientPool {
         temperature: f64,
         num_ctx: usize,
         timeout_seconds: u64,
+        think: bool,
     ) -> Option<tokio::sync::mpsc::Receiver<StreamChunk>> {
         let sem = self.semaphore_for(base_url).await;
         let _permit = sem.acquire().await.ok()?;
 
         let mut payload_messages = messages;
         if let Some(sys) = system {
-            payload_messages.insert(
-                0,
-                serde_json::json!({"role": "system", "content": sys}),
-            );
+            payload_messages.insert(0, serde_json::json!({"role": "system", "content": sys}));
         }
 
         let payload = serde_json::json!({
@@ -185,7 +197,7 @@ impl OllamaClientPool {
                 "temperature": temperature,
                 "num_ctx": num_ctx,
             },
-            "think": false,
+            "think": think,
         });
 
         let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
@@ -199,7 +211,10 @@ impl OllamaClientPool {
             .ok()?;
 
         if !response.status().is_success() {
-            warn!("Ollama stream request failed with status {}", response.status());
+            warn!(
+                "Ollama stream request failed with status {}",
+                response.status()
+            );
             return None;
         }
 
@@ -242,14 +257,18 @@ impl OllamaClientPool {
                     }
 
                     if done {
-                        let input_tokens = obj.get("prompt_eval_count")
-                            .and_then(|v| v.as_u64()).unwrap_or(0);
-                        let output_tokens = obj.get("eval_count")
-                            .and_then(|v| v.as_u64()).unwrap_or(0);
-                        let _ = tx.send(StreamChunk::Done {
-                            input_tokens,
-                            output_tokens,
-                        }).await;
+                        let input_tokens = obj
+                            .get("prompt_eval_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let output_tokens =
+                            obj.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let _ = tx
+                            .send(StreamChunk::Done {
+                                input_tokens,
+                                output_tokens,
+                            })
+                            .await;
                         return;
                     }
                 }

@@ -79,13 +79,14 @@ static ERROR_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static STACK_TRACE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?im)(?:traceback \(most recent call last\)|\bat [^\n]+:\d+|file "[^"\n]+", line \d+)"#)
-        .expect("stack trace regex")
+    Regex::new(
+        r#"(?im)(?:traceback \(most recent call last\)|\bat [^\n]+:\d+|file "[^"\n]+", line \d+)"#,
+    )
+    .expect("stack trace regex")
 });
 
-static JSON_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)```(?:json|javascript)\b").expect("json block regex")
-});
+static JSON_BLOCK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)```(?:json|javascript)\b").expect("json block regex"));
 
 static DIFF_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Python uses negative lookahead (?!\+\+\+|---) which Rust regex doesn't support.
@@ -94,9 +95,8 @@ static DIFF_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^[+][^+].*$|^[-][^-].*$").expect("diff line regex")
 });
 
-static FENCED_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"```").expect("fenced block regex")
-});
+static FENCED_BLOCK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"```").expect("fenced block regex"));
 
 static TOOL_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:tool_call|tool_calls|function_call|recipient_name)")
@@ -110,9 +110,7 @@ static COMMAND_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("command line regex")
 });
 
-static QUESTION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\?").expect("question regex")
-});
+static QUESTION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?").expect("question regex"));
 
 fn line_count(text: &str) -> usize {
     if text.is_empty() {
@@ -141,10 +139,7 @@ pub fn extract_task_metrics(
         .captures_iter(&combined)
         .filter_map(|c| c.name("path").map(|m| m.as_str().to_string()))
         .collect();
-    let unique_file_refs: HashSet<String> = file_refs
-        .iter()
-        .map(|p| p.to_lowercase())
-        .collect();
+    let unique_file_refs: HashSet<String> = file_refs.iter().map(|p| p.to_lowercase()).collect();
 
     // Message counting from trajectory JSON
     let (message_count, user_msg, assistant_msg, tool_msg) = count_messages(trajectory_json);
@@ -312,22 +307,14 @@ mod tests {
 
     #[test]
     fn test_file_references() {
-        let metrics = extract_task_metrics(
-            "Update src/auth.py and tests/test_auth.py",
-            "",
-            0,
-        );
+        let metrics = extract_task_metrics("Update src/auth.py and tests/test_auth.py", "", 0);
         assert!(metrics.file_reference_count >= 2);
         assert!(metrics.unique_file_reference_count >= 2);
     }
 
     #[test]
     fn test_command_detection() {
-        let metrics = extract_task_metrics(
-            "$ npm install\n$ pytest tests/",
-            "",
-            0,
-        );
+        let metrics = extract_task_metrics("$ npm install\n$ pytest tests/", "", 0);
         assert!(metrics.command_count >= 2);
     }
 
@@ -347,7 +334,8 @@ mod tests {
 
     #[test]
     fn test_prior_failure_count() {
-        let trajectory = r#"{"attempts": [{"status": "error"}, {"status": "success"}, {"status": "timeout"}]}"#;
+        let trajectory =
+            r#"{"attempts": [{"status": "error"}, {"status": "success"}, {"status": "timeout"}]}"#;
         let metrics = extract_task_metrics("retry", trajectory, 0);
         assert_eq!(metrics.prior_failure_count, 2);
     }

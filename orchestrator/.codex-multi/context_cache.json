@@ -1,0 +1,13 @@
+{
+  "languages": [
+    "Python"
+  ],
+  "file_count": 59,
+  "test_frameworks": [
+    "pytest"
+  ],
+  "build_tools": [],
+  "has_docker": false,
+  "has_ci": false,
+  "estimated_complexity": "medium"
+}

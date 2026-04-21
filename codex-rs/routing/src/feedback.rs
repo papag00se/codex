@@ -16,13 +16,13 @@ use tracing::{info, warn};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingOutcome {
     pub timestamp: u64,
-    pub route: String,        // classifier's route decision
-    pub model: String,        // actual model used
-    pub success: bool,        // did the request produce a useful response?
+    pub route: String, // classifier's route decision
+    pub model: String, // actual model used
+    pub success: bool, // did the request produce a useful response?
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub latency_ms: u64,
-    pub quality_ok: bool,     // did it pass quality check (G7)?
+    pub quality_ok: bool, // did it pass quality check (G7)?
 }
 
 /// Aggregated success rates per route.
@@ -36,7 +36,11 @@ pub struct RouteProfile {
 
 impl RouteProfile {
     pub fn success_rate(&self) -> f64 {
-        if self.total == 0 { 0.0 } else { self.successes as f64 / self.total as f64 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.successes as f64 / self.total as f64
+        }
     }
 }
 
@@ -69,8 +73,7 @@ impl FeedbackStore {
             profile.successes += 1;
         }
         let n = profile.total;
-        profile.avg_latency_ms =
-            ((profile.avg_latency_ms * (n - 1)) + outcome.latency_ms) / n;
+        profile.avg_latency_ms = ((profile.avg_latency_ms * (n - 1)) + outcome.latency_ms) / n;
         profile.avg_tokens =
             ((profile.avg_tokens * (n - 1)) + outcome.input_tokens + outcome.output_tokens) / n;
 
@@ -150,10 +153,9 @@ impl FeedbackStore {
                 let n = profile.total;
                 profile.avg_latency_ms =
                     ((profile.avg_latency_ms * (n - 1)) + outcome.latency_ms) / n;
-                profile.avg_tokens = ((profile.avg_tokens * (n - 1))
-                    + outcome.input_tokens
-                    + outcome.output_tokens)
-                    / n;
+                profile.avg_tokens =
+                    ((profile.avg_tokens * (n - 1)) + outcome.input_tokens + outcome.output_tokens)
+                        / n;
                 count += 1;
             }
         }
@@ -182,16 +184,34 @@ mod tests {
 
         let mut store = FeedbackStore::new(&dir);
         store.record(RoutingOutcome {
-            timestamp: 1, route: "light_reasoner".into(), model: "qwen3.5:9b".into(),
-            success: true, input_tokens: 100, output_tokens: 50, latency_ms: 3000, quality_ok: true,
+            timestamp: 1,
+            route: "light_reasoner".into(),
+            model: "qwen3.5:9b".into(),
+            success: true,
+            input_tokens: 100,
+            output_tokens: 50,
+            latency_ms: 3000,
+            quality_ok: true,
         });
         store.record(RoutingOutcome {
-            timestamp: 2, route: "light_reasoner".into(), model: "qwen3.5:9b".into(),
-            success: true, input_tokens: 200, output_tokens: 100, latency_ms: 4000, quality_ok: true,
+            timestamp: 2,
+            route: "light_reasoner".into(),
+            model: "qwen3.5:9b".into(),
+            success: true,
+            input_tokens: 200,
+            output_tokens: 100,
+            latency_ms: 4000,
+            quality_ok: true,
         });
         store.record(RoutingOutcome {
-            timestamp: 3, route: "light_reasoner".into(), model: "qwen3.5:9b".into(),
-            success: false, input_tokens: 150, output_tokens: 0, latency_ms: 2000, quality_ok: false,
+            timestamp: 3,
+            route: "light_reasoner".into(),
+            model: "qwen3.5:9b".into(),
+            success: false,
+            input_tokens: 150,
+            output_tokens: 0,
+            latency_ms: 2000,
+            quality_ok: false,
         });
 
         let profile = store.profiles().get("light_reasoner").unwrap();
@@ -213,9 +233,14 @@ mod tests {
             let mut store = FeedbackStore::new(&dir);
             for i in 0..5 {
                 store.record(RoutingOutcome {
-                    timestamp: i, route: "cloud_fast".into(), model: "spark".into(),
-                    success: i < 4, input_tokens: 100, output_tokens: 50,
-                    latency_ms: 1000, quality_ok: true,
+                    timestamp: i,
+                    route: "cloud_fast".into(),
+                    model: "spark".into(),
+                    success: i < 4,
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    latency_ms: 1000,
+                    quality_ok: true,
                 });
             }
         }
@@ -238,9 +263,14 @@ mod tests {
         let mut store = FeedbackStore::new(&dir);
         for i in 0..5 {
             store.record(RoutingOutcome {
-                timestamp: i, route: "light_reasoner".into(), model: "qwen".into(),
-                success: true, input_tokens: 100, output_tokens: 50,
-                latency_ms: 3000, quality_ok: true,
+                timestamp: i,
+                route: "light_reasoner".into(),
+                model: "qwen".into(),
+                success: true,
+                input_tokens: 100,
+                output_tokens: 50,
+                latency_ms: 3000,
+                quality_ok: true,
             });
         }
         let ctx = store.profile_context();

@@ -12,8 +12,8 @@
 
 pub mod budget_pressure;
 pub mod classifier;
-pub mod claude_cli;
 pub mod classify_cache;
+pub mod claude_cli;
 pub mod codebase_context;
 pub mod compaction;
 pub mod config;
@@ -23,20 +23,25 @@ pub mod engine;
 pub mod failover;
 pub mod feedback;
 pub mod local_dispatch;
+pub mod local_web_search;
 pub mod metrics;
 pub mod ollama;
 pub mod project_config;
 pub mod prompt_adapt;
 pub mod quality;
 pub mod session_memory;
+pub mod tool_aliases;
 pub mod tool_format;
 pub mod tool_recovery;
+pub mod trim;
 pub mod usage;
 
-pub use classifier::{classify_request, ClassifyResult, RouteTarget};
+pub use classifier::{ClassifyResult, RouteTarget, classify_request};
 pub use config::RoutingConfig;
-pub use engine::{route_task, RouteDecision};
-pub use metrics::{estimate_tokens, extract_task_metrics, TaskMetrics};
+pub use engine::{RouteDecision, route_task};
+pub use local_dispatch::{OllamaTextResponse, call_ollama_text};
+pub use metrics::{TaskMetrics, estimate_tokens, extract_task_metrics};
 pub use ollama::OllamaClientPool;
-pub use local_dispatch::{call_ollama_text, OllamaTextResponse};
-pub use tool_recovery::{recover_tool_calls, recover_tool_calls_streaming, RecoveredMessage, ToolCall};
+pub use tool_recovery::{
+    RecoveredMessage, ToolCall, recover_tool_calls, recover_tool_calls_streaming,
+};

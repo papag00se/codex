@@ -22,6 +22,7 @@ pub enum ToolHandlerKind {
     JsReplReset,
     ListAgentsV2,
     ListDir,
+    LocalWebSearch,
     Mcp,
     McpResource,
     Plan,

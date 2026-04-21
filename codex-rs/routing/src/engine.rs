@@ -5,7 +5,7 @@
 //! See docs/spec/routing-logic-reference.md.
 
 use crate::config::RoutingConfig;
-use crate::metrics::{estimate_tokens, extract_task_metrics, TaskMetrics};
+use crate::metrics::{TaskMetrics, estimate_tokens, extract_task_metrics};
 use crate::ollama::OllamaClientPool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -21,14 +21,12 @@ pub struct RouteDecision {
 }
 
 /// Router task prompt — sent as part of the digest to the router model.
-const ROUTER_TASK: &str =
-    "Choose exactly one route from available_routes for this request.\n\
+const ROUTER_TASK: &str = "Choose exactly one route from available_routes for this request.\n\
      Return JSON only with keys route, confidence, reason.\n\
      route must exactly match one entry in available_routes.";
 
 /// Router system prompt — the system message for the router model.
-const ROUTER_SYSTEM: &str =
-    "Return JSON only with keys: route, confidence, reason.\n\
+const ROUTER_SYSTEM: &str = "Return JSON only with keys: route, confidence, reason.\n\
      Pick exactly one route from the available routes.";
 
 /// Deterministic fallback order — coder preferred (has tools),
@@ -432,13 +430,7 @@ mod tests {
             fallback_route(&["local_reasoner".into(), "codex_cli".into()]),
             "local_reasoner"
         );
-        assert_eq!(
-            fallback_route(&["codex_cli".into()]),
-            "codex_cli"
-        );
-        assert_eq!(
-            fallback_route(&[]),
-            "local_reasoner"
-        );
+        assert_eq!(fallback_route(&["codex_cli".into()]), "codex_cli");
+        assert_eq!(fallback_route(&[]), "local_reasoner");
     }
 }

@@ -11,5 +11,5 @@ pub mod normalize;
 pub mod pipeline;
 pub mod render;
 
-pub use pipeline::{compact_transcript, CompactionConfig};
 pub use models::{ChunkExtraction, DurableMemorySet, MergedState, SessionHandoff, TranscriptChunk};
+pub use pipeline::{CompactionConfig, compact_transcript};

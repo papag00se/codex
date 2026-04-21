@@ -27,36 +27,51 @@ pub fn render_durable_memory(
     current_request: &str,
 ) -> DurableMemorySet {
     DurableMemorySet {
-        task_state: render_section("Task State", &[
-            ("Objective", &[state.objective.clone()]),
-            ("Files Touched", &state.files_touched),
-            ("Commands Run", &state.commands_run),
-            ("Test Status", &state.test_status),
-        ]),
-        decisions: render_section("Decisions", &[
-            ("Accepted Fixes", &state.accepted_fixes),
-            ("Constraints", &state.constraints),
-        ]),
-        failures_to_avoid: render_section("Failures To Avoid", &[
-            ("Errors", &state.errors),
-            ("Rejected Ideas", &state.rejected_ideas),
-        ]),
-        next_steps: render_section("Next Steps", &[
-            ("Pending TODOs", &state.pending_todos),
-            ("Latest Plan", &state.latest_plan),
-        ]),
-        session_handoff: render_section("Session Handoff", &[
-            ("Stable Task Definition", &[state.objective.clone()]),
-            ("Unresolved Work", &[state.pending_todos.clone(), state.unresolved_bugs.clone()].concat()),
-        ]),
+        task_state: render_section(
+            "Task State",
+            &[
+                ("Objective", &[state.objective.clone()]),
+                ("Files Touched", &state.files_touched),
+                ("Commands Run", &state.commands_run),
+                ("Test Status", &state.test_status),
+            ],
+        ),
+        decisions: render_section(
+            "Decisions",
+            &[
+                ("Accepted Fixes", &state.accepted_fixes),
+                ("Constraints", &state.constraints),
+            ],
+        ),
+        failures_to_avoid: render_section(
+            "Failures To Avoid",
+            &[
+                ("Errors", &state.errors),
+                ("Rejected Ideas", &state.rejected_ideas),
+            ],
+        ),
+        next_steps: render_section(
+            "Next Steps",
+            &[
+                ("Pending TODOs", &state.pending_todos),
+                ("Latest Plan", &state.latest_plan),
+            ],
+        ),
+        session_handoff: render_section(
+            "Session Handoff",
+            &[
+                ("Stable Task Definition", &[state.objective.clone()]),
+                (
+                    "Unresolved Work",
+                    &[state.pending_todos.clone(), state.unresolved_bugs.clone()].concat(),
+                ),
+            ],
+        ),
     }
 }
 
 /// Render an inline compaction summary (what the model sees).
-pub fn render_compaction_summary(
-    memory: &DurableMemorySet,
-    current_request: &str,
-) -> String {
+pub fn render_compaction_summary(memory: &DurableMemorySet, current_request: &str) -> String {
     let mut parts = Vec::new();
 
     for (name, content) in [

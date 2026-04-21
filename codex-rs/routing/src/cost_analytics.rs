@@ -42,9 +42,7 @@ pub struct CostAnalytics {
 
 impl CostAnalytics {
     pub fn new(project_dir: &Path) -> Self {
-        let log_path = project_dir
-            .join(".codex-multi")
-            .join("usage_log.jsonl");
+        let log_path = project_dir.join(".codex-multi").join("usage_log.jsonl");
         Self { log_path }
     }
 
@@ -90,7 +88,9 @@ impl CostAnalytics {
 
         for line in content.lines() {
             let line = line.trim();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             if let Ok(summary) = serde_json::from_str::<SessionUsageSummary>(line) {
                 agg.session_count += 1;
                 agg.total_local_tokens += summary.local_tokens;

@@ -16,7 +16,8 @@ pub fn chunk_items(
         return Vec::new();
     }
 
-    let token_counts: Vec<usize> = items.iter()
+    let token_counts: Vec<usize> = items
+        .iter()
         .map(|item| estimate_tokens(&serde_json::to_string(item).unwrap_or_default()))
         .collect();
 
@@ -72,7 +73,10 @@ pub fn chunk_items(
 }
 
 /// Split recent raw turns from the end of items.
-pub fn split_recent_raw(items: &[serde_json::Value], keep_tokens: usize) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+pub fn split_recent_raw(
+    items: &[serde_json::Value],
+    keep_tokens: usize,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     if keep_tokens == 0 || items.is_empty() {
         return (items.to_vec(), Vec::new());
     }
@@ -96,11 +100,18 @@ pub fn split_recent_raw(items: &[serde_json::Value], keep_tokens: usize) -> (Vec
 }
 
 fn overlap_size(token_counts: &[usize], start: usize, end: usize) -> usize {
-    if start >= end { return 0; }
+    if start >= end {
+        return 0;
+    }
     token_counts[start..end].iter().sum()
 }
 
-fn next_chunk_start(token_counts: &[usize], _start: usize, end: usize, overlap_tokens: usize) -> usize {
+fn next_chunk_start(
+    token_counts: &[usize],
+    _start: usize,
+    end: usize,
+    overlap_tokens: usize,
+) -> usize {
     let mut carried = 0;
     let mut overlap_start = end;
     for i in (0..end).rev() {
@@ -125,7 +136,8 @@ mod tests {
         let chunks = chunk_items(&items, 200, 400, 50);
         assert!(!chunks.is_empty());
         // All items should be covered
-        let covered: std::collections::HashSet<usize> = chunks.iter()
+        let covered: std::collections::HashSet<usize> = chunks
+            .iter()
             .flat_map(|c| c.start_index..c.end_index)
             .collect();
         assert_eq!(covered.len(), 10);

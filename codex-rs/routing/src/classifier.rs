@@ -74,9 +74,16 @@ pub async fn classify_request(
     pool: &OllamaClientPool,
 ) -> ClassifyResult {
     classify_request_with_context(
-        prompt_text, tool_names, recent_tool_call_count, recent_turn_count,
-        config, pool, "", "",
-    ).await
+        prompt_text,
+        tool_names,
+        recent_tool_call_count,
+        recent_turn_count,
+        config,
+        pool,
+        "",
+        "",
+    )
+    .await
 }
 
 /// Classify a request with additional context from routing history and codebase.
@@ -117,26 +124,24 @@ pub async fn classify_request_with_context(
     // skip local routing and go to cloud. First call may be slow (cold model load)
     // but subsequent calls should be fast (<3s).
     let classify_future = pool.chat(
-            &classifier_ep.base_url,
-            &classifier_ep.model,
-            vec![serde_json::json!({"role": "user", "content": user_content})],
-            None,
-            0.0, // Deterministic
-            classifier_ep.num_ctx,
-            Some("json"),
-            10, // Hard 10s timeout for the Ollama HTTP call
-        );
+        &classifier_ep.base_url,
+        &classifier_ep.model,
+        vec![serde_json::json!({"role": "user", "content": user_content})],
+        None,
+        0.0, // Deterministic
+        classifier_ep.num_ctx,
+        Some("json"),
+        10, // Hard 10s timeout for the Ollama HTTP call
+    );
 
-    let response = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        classify_future,
-    ).await {
-        Ok(r) => r,
-        Err(_) => {
-            warn!("Classifier timed out (>10s), falling back to cloud_coder");
-            return fallback("classifier timeout");
-        }
-    };
+    let response =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), classify_future).await {
+            Ok(r) => r,
+            Err(_) => {
+                warn!("Classifier timed out (>10s), falling back to cloud_coder");
+                return fallback("classifier timeout");
+            }
+        };
 
     let Some(body) = response else {
         warn!("Classifier LLM unreachable, falling back to cloud_coder");

@@ -45,6 +45,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
     use crate::tools::handlers::JsReplHandler;
     use crate::tools::handlers::JsReplResetHandler;
     use crate::tools::handlers::ListDirHandler;
+    use crate::tools::handlers::LocalWebSearchHandler;
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::McpResourceHandler;
     use crate::tools::handlers::PlanHandler;
@@ -169,6 +170,9 @@ pub(crate) fn build_specs_with_discoverable_tools(
             }
             ToolHandlerKind::ListDir => {
                 builder.register_handler(handler.name, Arc::new(ListDirHandler));
+            }
+            ToolHandlerKind::LocalWebSearch => {
+                builder.register_handler(handler.name, Arc::new(LocalWebSearchHandler));
             }
             ToolHandlerKind::Mcp => {
                 builder.register_handler(handler.name, mcp_handler.clone());

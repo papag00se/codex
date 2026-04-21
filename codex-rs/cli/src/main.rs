@@ -83,6 +83,15 @@ struct MultitoolCli {
     #[clap(flatten)]
     interactive: TuiCli,
 
+    /// Disable all cloud providers. Cloud classifier routes are remapped onto
+    /// the local Light Coder/Reasoner and any cloud entries in failover chains
+    /// are skipped. If no local model can serve a request, the error is
+    /// surfaced to the user instead of silently falling back to cloud.
+    /// Equivalent to setting `local_only = true` in `.codex-multi/config.toml`
+    /// under [routing], or exporting `CODEX_LOCAL_ONLY=1`.
+    #[arg(long = "local-only", global = true, default_value_t = false)]
+    local_only: bool,
+
     #[clap(subcommand)]
     subcommand: Option<Subcommand>,
 }
@@ -622,8 +631,19 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         feature_toggles,
         remote,
         mut interactive,
+        local_only,
         subcommand,
     } = MultitoolCli::parse();
+
+    // --local-only is consumed by the routing layer via the CODEX_LOCAL_ONLY
+    // env var, so every subcommand and child process sees it.
+    if local_only {
+        // SAFETY: set_var is unsafe in edition 2024; we only call it before
+        // spawning any worker threads, while the process is single-threaded.
+        unsafe {
+            std::env::set_var("CODEX_LOCAL_ONLY", "1");
+        }
+    }
 
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;

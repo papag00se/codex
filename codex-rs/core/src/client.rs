@@ -1410,12 +1410,15 @@ impl ModelClientSession {
         turn_metadata_header: Option<&str>,
     ) -> Result<ResponseStream> {
         // Per-request routing: classify and route to local or override cloud model.
-        use crate::local_routing::{RouteResult, CloudFailoverCtx};
+        use crate::local_routing::{CloudFailoverCtx, RouteResult};
         let mut model_override: Option<ModelInfo>;
         let mut failover_ctx: Option<CloudFailoverCtx>;
         match crate::local_routing::route_request(prompt).await {
             RouteResult::Local(stream) => return Ok(stream),
-            RouteResult::CloudOverride { slug, failover_ctx: ctx } => {
+            RouteResult::CloudOverride {
+                slug,
+                failover_ctx: ctx,
+            } => {
                 let mut m = model_info.clone();
                 m.slug = slug;
                 model_override = Some(m);
@@ -1434,15 +1437,17 @@ impl ModelClientSession {
         loop {
             let effective_model = model_override.as_ref().unwrap_or(model_info);
 
-            let result = self.stream_cloud_inner(
-                prompt,
-                effective_model,
-                session_telemetry,
-                effort,
-                summary,
-                service_tier,
-                turn_metadata_header,
-            ).await;
+            let result = self
+                .stream_cloud_inner(
+                    prompt,
+                    effective_model,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    turn_metadata_header,
+                )
+                .await;
 
             match result {
                 Ok(stream) => return Ok(stream),
@@ -1456,7 +1461,9 @@ impl ModelClientSession {
                             &error_msg,
                             &mut cloud_attempt,
                             None, // TODO: parse retry-after header
-                        ).await {
+                        )
+                        .await
+                        {
                             let mut m = model_info.clone();
                             m.slug = new_slug;
                             model_override = Some(m);
