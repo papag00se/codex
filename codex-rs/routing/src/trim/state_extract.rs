@@ -13,6 +13,9 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use codex_protocol::models::ResponseItem;
+
+use super::items;
 use super::items::ParsedTranscript;
 use super::items::TrimItem;
 use super::signatures::path_from_signature;
@@ -189,7 +192,22 @@ pub fn extract(parsed: &ParsedTranscript, _active_turn: u32) -> ExtractedState {
         });
     }
 
-    state.repetition = detect_repetition(parsed);
+    // Two kinds of repetition: exact-signature (byte-identical args) and
+    // same-target failure streak (different args, same file, consecutive
+    // failures). The exact-signature detector catches "stuck calling X with
+    // the same args" loops; the failure-streak detector catches "writing
+    // syntactically-different-but-semantically-wrong patches on the same
+    // file" loops.
+    state.repetition = detect_repetition(parsed)
+        .or_else(|| detect_same_target_failure_repetition(parsed));
+    if let Some(alert) = state.repetition.as_ref() {
+        tracing::info!(
+            tool_name = %alert.tool_name,
+            count = alert.count,
+            summary = %alert.command_summary,
+            "Repetition alert fired — STOP block will be added to next prelude"
+        );
+    }
 
     state
 }
@@ -236,7 +254,17 @@ fn detect_repetition(parsed: &ParsedTranscript) -> Option<RepetitionAlert> {
             }
             // Tool outputs interleave with calls; skip them.
             TrimItem::ToolOutput { .. } => continue,
-            // Anything else (user message, assistant text) breaks the streak.
+            // Short assistant narration between identical calls is common
+            // (many local models emit 1-2 chars of content like "." or " "
+            // alongside every tool_call). Treat it as transparent so the
+            // streak keeps counting — same reasoning the same-target
+            // detector below already applies.
+            TrimItem::AssistantText { .. } => continue,
+            // Reasoning channel text is also transparent — it's private
+            // scratchpad, not a meaningful break in the stuck-loop pattern.
+            TrimItem::Reasoning { .. } => continue,
+            // User messages or anything else (Other, etc.) legitimately
+            // break the streak — a new user turn is a new task.
             _ => break,
         }
     }
@@ -272,6 +300,137 @@ fn detect_repetition(parsed: &ParsedTranscript) -> Option<RepetitionAlert> {
         count,
         last_output_excerpt,
     })
+}
+
+/// Walk the parsed transcript looking for 3+ consecutive tool-call failures
+/// targeting the same file. Catches the pattern where a model is writing
+/// syntactically-valid-but-semantically-wrong patches on the same file over
+/// and over — the exact-signature detector misses this because the args
+/// differ on each attempt. Called as a fallback after
+/// [`detect_repetition_by_signature`] finds nothing.
+fn detect_same_target_failure_repetition(parsed: &ParsedTranscript) -> Option<RepetitionAlert> {
+    const THRESHOLD: usize = 3;
+
+    // call_id -> output content + success flag, so we can look up outcomes.
+    let mut outputs: BTreeMap<String, (bool, String)> = BTreeMap::new();
+    for item in &parsed.items {
+        if let TrimItem::ToolOutput {
+            call_id,
+            success,
+            content,
+            ..
+        } = item
+        {
+            outputs.insert(call_id.clone(), (*success, content.clone()));
+        }
+    }
+
+    // Walk calls in reverse. Collect the streak of most-recent failed calls
+    // that target the same file via the same tool.
+    let mut streak_tool: Option<String> = None;
+    let mut streak_path: Option<String> = None;
+    let mut count = 0usize;
+    let mut last_output_excerpt = String::new();
+
+    for item in parsed.items.iter().rev() {
+        match item {
+            TrimItem::ToolCall {
+                tool_name,
+                signature,
+                args,
+                call_id,
+                ..
+            } => {
+                // Try both path extraction strategies: the signature-based
+                // one (works for grep/list_dir/text_editor where the path
+                // is in the normalized signature) and the args-based one
+                // (works for apply_patch where the path is buried inside
+                // the `input` field).
+                let path = path_from_signature(signature)
+                    .filter(|p| !p.is_empty() && *p != "?")
+                    .map(str::to_string)
+                    .or_else(|| derive_modification(tool_name, args).map(|(p, _)| p));
+                let Some(path) = path else {
+                    break;
+                };
+                let Some((success, content)) = outputs.get(call_id) else {
+                    break;
+                };
+                if *success {
+                    break;
+                }
+                let key = (tool_name.clone(), path);
+                match (&streak_tool, &streak_path) {
+                    (None, None) => {
+                        streak_tool = Some(key.0);
+                        streak_path = Some(key.1);
+                        last_output_excerpt = excerpt(content, 200);
+                        count = 1;
+                    }
+                    (Some(t), Some(p)) if *t == key.0 && *p == key.1 => {
+                        count += 1;
+                    }
+                    _ => break,
+                }
+            }
+            // Tool outputs interleave with calls; skip them.
+            TrimItem::ToolOutput { .. } => continue,
+            // Assistant narration between failed attempts is common — don't
+            // break the streak on it, since this repetition mode is about
+            // repeated FAILURES on the same target regardless of whether
+            // the model narrates its confusion between attempts.
+            TrimItem::AssistantText { .. } => continue,
+            // Anything else (user message, reasoning, other) breaks the streak.
+            _ => break,
+        }
+    }
+
+    if count < THRESHOLD {
+        return None;
+    }
+
+    let tool_name = streak_tool?;
+    let path = streak_path?;
+    Some(RepetitionAlert {
+        tool_name,
+        command_summary: format!("{count} consecutive failures on {path}"),
+        count,
+        last_output_excerpt,
+    })
+}
+
+/// Public helper: return the list of file paths that were created or edited
+/// during the active turn. Used by callers (e.g. `local_routing`) to decide
+/// which files to read fresh from disk and pass back via
+/// [`super::TrimInput::current_files`]. Deleted files are not returned (they
+/// don't exist to read).
+pub fn files_modified_in_active_turn(items: &[ResponseItem]) -> Vec<String> {
+    let parsed = items::parse(items);
+    let active = parsed.active_turn_id();
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for item in &parsed.items {
+        if let TrimItem::ToolCall {
+            tool_name,
+            args,
+            turn_id,
+            ..
+        } = item
+        {
+            if *turn_id != active {
+                continue;
+            }
+            if let Some((path, op)) = derive_modification(tool_name, args) {
+                if matches!(op, ModifyOp::Deleted) {
+                    continue;
+                }
+                if seen.insert(path.clone()) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn derive_modification(tool_name: &str, args_raw: &str) -> Option<(String, ModifyOp)> {

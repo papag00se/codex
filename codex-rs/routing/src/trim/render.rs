@@ -10,6 +10,7 @@
 
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use super::items::ParsedTranscript;
 use super::items::TrimItem;
@@ -17,13 +18,22 @@ use super::rules::CompressedOlder;
 use super::state_extract::ExtractedState;
 use super::state_extract::ModifyOp;
 
+/// Cap applied to each injected current-file block. Large files get
+/// truncated with a notice so a single edit doesn't blow the whole context
+/// budget. 10 KB is enough for any normal source file.
+const CURRENT_FILE_MAX_BYTES: usize = 10_240;
+
 /// Render the full prelude block. Empty if there's nothing to say (e.g. an
 /// empty transcript with no user instructions). The `active_turn` is used to
 /// compute "turns since last modification" hints in the world-state block.
+/// `current_files` (if provided) supplies fresh disk content for files that
+/// were modified in the active turn so the model can't work from a stale
+/// mental model after its own edits land.
 pub fn render_prelude(
     user_instructions: Option<&str>,
     state: &ExtractedState,
     active_turn: u32,
+    current_files: Option<&HashMap<String, String>>,
 ) -> String {
     let mut sections: Vec<String> = Vec::new();
 
@@ -38,6 +48,14 @@ pub fn render_prelude(
         && !inst.trim().is_empty()
     {
         sections.push(format!("[Persistent project context]\n{}", inst.trim()));
+    }
+
+    // Pin current on-disk contents of any files the active turn has edited.
+    // This block is right under the repetition alert because when a model
+    // is looping on stale patches, the authoritative remedy is "here is
+    // what the file ACTUALLY says right now."
+    if let Some(block) = render_current_files(state, current_files, active_turn) {
+        sections.push(block);
     }
 
     let world = render_world_state(state, active_turn);
@@ -66,6 +84,70 @@ pub fn render_prelude(
     }
 
     sections.join("\n\n")
+}
+
+/// Render a `[Current file state]` block listing the verbatim on-disk
+/// contents of every file the active turn has modified (Add File / Update
+/// File, but not Delete). Returns `None` when there's nothing to inject.
+fn render_current_files(
+    state: &ExtractedState,
+    current_files: Option<&HashMap<String, String>>,
+    active_turn: u32,
+) -> Option<String> {
+    let current_files = current_files?;
+    let mut entries: Vec<String> = Vec::new();
+    for (path, modified) in &state.files_modified {
+        if modified.turn_id != active_turn {
+            continue;
+        }
+        if matches!(modified.op, ModifyOp::Deleted) {
+            continue;
+        }
+        let Some(content) = current_files.get(path) else {
+            continue;
+        };
+        let total = content.len();
+        let (body, truncated) = if total > CURRENT_FILE_MAX_BYTES {
+            let mut cut = CURRENT_FILE_MAX_BYTES;
+            while cut < total && !content.is_char_boundary(cut) {
+                cut += 1;
+            }
+            (&content[..cut], true)
+        } else {
+            (content.as_str(), false)
+        };
+        let hash = short_hash(content);
+        let line_count = content.lines().count();
+        let mut header = format!(
+            "--- Current content of {path} (hash {hash}, {line_count} lines, {total} bytes)"
+        );
+        if truncated {
+            header.push_str(" — TRUNCATED to first ");
+            header.push_str(&CURRENT_FILE_MAX_BYTES.to_string());
+            header.push_str(" bytes below");
+        }
+        entries.push(format!("{header}\n{body}\n--- End of {path}"));
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Current file state — authoritative. Work from this content, not from memory of earlier patches.]\n{}",
+        entries.join("\n\n")
+    ))
+}
+
+/// Tiny non-cryptographic hash for displaying content identity. Only needs
+/// to be stable within one render; collision resistance is not required.
+fn short_hash(s: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hash;
+    use std::hash::Hasher;
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    let raw = hasher.finish();
+    // Take the first 8 hex chars for a compact, readable ID.
+    format!("{raw:016x}")[..8].to_string()
 }
 
 fn render_repetition_alert(state: &ExtractedState) -> Option<String> {
@@ -194,6 +276,7 @@ pub fn render_messages(
     older: &CompressedOlder,
     parsed: &ParsedTranscript,
     active_turn: u32,
+    flavor: crate::config::ClientFlavor,
 ) -> (Vec<JsonValue>, usize) {
     let mut messages: Vec<JsonValue> = Vec::new();
 
@@ -290,16 +373,29 @@ pub fn render_messages(
                 call_id,
                 ..
             } => {
-                // Ollama's chat API expects `arguments` as a JSON object, not
-                // a JSON-encoded string. Parse our stored args (which arrived
-                // as a raw string from the model) and embed as an object;
-                // fall back to an empty object on parse failure so we never
-                // send a malformed message that returns 400.
-                //
-                // Likewise, `content: null` triggers Ollama's parser to
-                // complain about an unclosed object; use an empty string.
-                let args_obj: serde_json::Value =
-                    serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}));
+                // Wire format for `arguments` differs by flavor:
+                //   - Ollama: JSON OBJECT (sending a string triggers parser
+                //     errors). We parse our stored args as JSON and embed
+                //     verbatim, defaulting to `{}` on parse failure.
+                //   - OpenAI-compat: JSON STRING (the OpenAI spec requires
+                //     this; LM Studio rejects object-form with
+                //     "Invalid 'messages' in payload"). Pass the raw args
+                //     string through; if the model emitted invalid JSON
+                //     for some reason, send "{}" so the wire payload still
+                //     parses.
+                let args_value = match flavor {
+                    crate::config::ClientFlavor::Ollama => {
+                        serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}))
+                    }
+                    crate::config::ClientFlavor::OpenAICompat => {
+                        let validated = if serde_json::from_str::<serde_json::Value>(args).is_ok() {
+                            args.to_string()
+                        } else {
+                            "{}".to_string()
+                        };
+                        serde_json::Value::String(validated)
+                    }
+                };
                 messages.push(serde_json::json!({
                     "role": "assistant",
                     "content": "",
@@ -308,7 +404,7 @@ pub fn render_messages(
                         "type": "function",
                         "function": {
                             "name": tool_name,
-                            "arguments": args_obj,
+                            "arguments": args_value,
                         }
                     }]
                 }));
@@ -344,12 +440,41 @@ pub fn render_messages(
                 } else {
                     String::new()
                 };
-                messages.push(serde_json::json!({
-                    "role": "user",
-                    "content": format!(
-                        "<{tag} tool=\"{tool_name}\" call_id=\"{call_id}\">\n{content}\n</{tag}>{hint}"
-                    ),
-                }));
+                match flavor {
+                    crate::config::ClientFlavor::OpenAICompat => {
+                        // OpenAI-compat servers (LM Studio, vLLM, llama.cpp)
+                        // strictly require an `assistant{tool_calls}` to be
+                        // followed by `role: tool` with a matching
+                        // `tool_call_id`. Anything else (e.g. our `<tool_result>`
+                        // user-message wrapper) is rejected as
+                        // "Invalid 'messages' in payload."
+                        let mut content_str = if *success {
+                            content.clone()
+                        } else {
+                            format!("<{tag} tool=\"{tool_name}\">\n{content}\n</{tag}>")
+                        };
+                        if !hint.is_empty() {
+                            content_str.push_str(&hint);
+                        }
+                        messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": content_str,
+                        }));
+                    }
+                    crate::config::ClientFlavor::Ollama => {
+                        // Ollama is lenient — wrap in user-role <tool_result>
+                        // so the chat template renders it as visible context.
+                        // The role:tool form often gets stripped by local
+                        // model templates that weren't trained on it.
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": format!(
+                                "<{tag} tool=\"{tool_name}\" call_id=\"{call_id}\">\n{content}\n</{tag}>{hint}"
+                            ),
+                        }));
+                    }
+                }
             }
             TrimItem::Other { .. } => {
                 // Skip unknown types in the active turn rather than risk

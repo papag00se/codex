@@ -408,6 +408,22 @@ async fn derive_new_contents_from_chunks(
     })
 }
 
+/// Detects whether a string looks like a unified-diff hunk header
+/// (e.g. `-17,7 +17,7 @@`, `-1 +1`). Used to give a better error message
+/// when a model writes such a header inside `@@ ...`, which Codex apply_patch
+/// would otherwise treat as a literal anchor line and fail to find.
+fn looks_like_unified_diff_hunk_header(s: &str) -> bool {
+    let trimmed = s.trim();
+    let Some(rest) = trimmed.strip_prefix('-') else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_digit() && trimmed.contains('+')
+}
+
 /// Compute a list of replacements needed to transform `original_lines` into the
 /// new lines, given the patch `chunks`. Each replacement is returned as
 /// `(start_index, old_len, new_lines)`.
@@ -431,11 +447,26 @@ fn compute_replacements(
             ) {
                 line_index = idx + 1;
             } else {
-                return Err(ApplyPatchError::ComputeReplacements(format!(
-                    "Failed to find context '{}' in {}",
-                    ctx_line,
-                    path.display()
-                )));
+                let hint = if looks_like_unified_diff_hunk_header(ctx_line) {
+                    format!(
+                        "Failed to find context '{ctx_line}' in {}. \
+                         The `@@ {ctx_line}` line looks like a unified-diff hunk header \
+                         (line numbers like `-17,7 +17,7 @@`). Codex apply_patch does NOT \
+                         use line numbers — `@@ <text>` treats `<text>` as a literal anchor \
+                         line to find in the file (e.g. `@@ def my_function():`). Either \
+                         omit the hunk header entirely (use `@@` alone or no header at all) \
+                         and rely on the `-`/`+` lines + surrounding context to anchor the \
+                         change, or use a real anchor line that exists in the file.",
+                        path.display(),
+                    )
+                } else {
+                    format!(
+                        "Failed to find context '{}' in {}",
+                        ctx_line,
+                        path.display()
+                    )
+                };
+                return Err(ApplyPatchError::ComputeReplacements(hint));
             }
         }
 

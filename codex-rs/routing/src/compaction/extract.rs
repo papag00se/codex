@@ -75,16 +75,14 @@ pub async fn extract_chunk(
         "Extracting chunk state"
     );
 
+    let mut extract_ep = endpoint.clone();
+    extract_ep.temperature = 0.0;
     let response = pool
         .chat(
-            &endpoint.base_url,
-            &endpoint.model,
+            &extract_ep,
             vec![serde_json::json!({"role": "user", "content": payload_str})],
             Some(EXTRACTION_SYSTEM_PROMPT),
-            0.0,
-            endpoint.num_ctx,
             Some("json"),
-            endpoint.timeout_seconds,
         )
         .await;
 

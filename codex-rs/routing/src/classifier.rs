@@ -123,15 +123,15 @@ pub async fn classify_request_with_context(
     // Short timeout for classifier — if it takes more than 10 seconds,
     // skip local routing and go to cloud. First call may be slow (cold model load)
     // but subsequent calls should be fast (<3s).
+    let mut classifier_override = classifier_ep.clone();
+    classifier_override.temperature = 0.0; // Deterministic
+    classifier_override.timeout_seconds = 10; // Hard 10s timeout
+    classifier_override.think = false; // Never reason on classify
     let classify_future = pool.chat(
-        &classifier_ep.base_url,
-        &classifier_ep.model,
+        &classifier_override,
         vec![serde_json::json!({"role": "user", "content": user_content})],
         None,
-        0.0, // Deterministic
-        classifier_ep.num_ctx,
         Some("json"),
-        10, // Hard 10s timeout for the Ollama HTTP call
     );
 
     let response =

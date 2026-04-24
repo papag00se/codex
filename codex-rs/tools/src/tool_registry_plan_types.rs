@@ -23,6 +23,7 @@ pub enum ToolHandlerKind {
     ListAgentsV2,
     ListDir,
     LocalWebSearch,
+    WebFetch,
     Mcp,
     McpResource,
     Plan,

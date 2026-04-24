@@ -49,6 +49,17 @@ pub enum ModelRole {
         /// catalog without losing focus.
         #[serde(default)]
         tool_subset: Option<String>,
+        /// Hard ceiling on output tokens per response. Maps to
+        /// `max_tokens` for OpenAI-compat and `options.num_predict` for
+        /// Ollama. Unset — or explicitly `0` — means no cap (server
+        /// default applies). Useful to prevent runaway reasoning loops
+        /// on thinking-capable models.
+        #[serde(default)]
+        max_tokens: Option<usize>,
+        /// Per-request HTTP timeout in seconds. Defaults to 300. Raise
+        /// for slow reasoning models, lower for fast-fail behavior.
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
     },
     Weighted {
         entries: Vec<ModelEntry>,

@@ -23,6 +23,8 @@ struct LocalWebSearchArgs {
     query: String,
     #[serde(default)]
     count: Option<usize>,
+    #[serde(default)]
+    user_agent: Option<String>,
 }
 
 impl ToolHandler for LocalWebSearchHandler {
@@ -59,7 +61,7 @@ impl ToolHandler for LocalWebSearchHandler {
             .count
             .unwrap_or(project_config.search.results_per_query);
 
-        match local_web_search::search(&api_key, query, count).await {
+        match local_web_search::search(&api_key, query, count, args.user_agent.as_deref()).await {
             Ok(results) => Ok(FunctionToolOutput::from_text(
                 local_web_search::format_results(query, &results),
                 Some(true),

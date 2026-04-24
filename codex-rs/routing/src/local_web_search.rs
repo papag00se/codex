@@ -8,6 +8,13 @@ use serde::Deserialize;
 
 const BRAVE_ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
 
+/// Default User-Agent sent on every Brave Search request when the caller
+/// doesn't supply one. Matches what current Brave Browser sends on Linux
+/// desktop — Brave intentionally identifies as Chrome to avoid being
+/// fingerprinted as a separate browser.
+pub const DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+
 /// Result of a single Brave search call.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -62,11 +69,13 @@ struct BraveResult {
 }
 
 /// Execute a Brave web search. Caller is responsible for clamping `count` to
-/// the API's allowed range (1-20).
+/// the API's allowed range (1-20). `user_agent` is sent verbatim if `Some`;
+/// otherwise [`DEFAULT_USER_AGENT`] is used.
 pub async fn search(
     api_key: &str,
     query: &str,
     count: usize,
+    user_agent: Option<&str>,
 ) -> Result<Vec<SearchResult>, SearchError> {
     if api_key.trim().is_empty() {
         return Err(SearchError::Unconfigured);
@@ -78,6 +87,7 @@ pub async fn search(
         .get(BRAVE_ENDPOINT)
         .header("X-Subscription-Token", api_key)
         .header("Accept", "application/json")
+        .header("User-Agent", user_agent.unwrap_or(DEFAULT_USER_AGENT))
         .query(&[("q", query), ("count", &count_clamped.to_string())])
         .send()
         .await
@@ -139,10 +149,10 @@ mod tests {
     #[test]
     fn unconfigured_returns_error() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(search("", "test", 5));
+        let result = rt.block_on(search("", "test", 5, None));
         assert!(matches!(result, Err(SearchError::Unconfigured)));
 
-        let result = rt.block_on(search("   ", "test", 5));
+        let result = rt.block_on(search("   ", "test", 5, None));
         assert!(matches!(result, Err(SearchError::Unconfigured)));
     }
 

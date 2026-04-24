@@ -28,8 +28,10 @@ use crate::create_js_repl_reset_tool;
 use crate::create_js_repl_tool;
 use crate::create_list_agents_tool;
 use crate::LOCAL_WEB_SEARCH_TOOL_NAME;
+use crate::WEB_FETCH_TOOL_NAME;
 use crate::create_list_dir_tool;
 use crate::create_local_web_search_tool;
+use crate::create_web_fetch_tool;
 use crate::create_list_mcp_resource_templates_tool;
 use crate::create_list_mcp_resources_tool;
 use crate::create_local_shell_tool;
@@ -343,6 +345,15 @@ pub fn build_tool_registry_plan(
             config.code_mode_enabled,
         );
         plan.register_handler(LOCAL_WEB_SEARCH_TOOL_NAME, ToolHandlerKind::LocalWebSearch);
+
+        // Pair `local_web_search` (finds URLs) with `web_fetch` (reads one).
+        // Also safe to expose unconditionally — the handler validates the URL.
+        plan.push_spec(
+            create_web_fetch_tool(),
+            /*supports_parallel_tool_calls*/ true,
+            config.code_mode_enabled,
+        );
+        plan.register_handler(WEB_FETCH_TOOL_NAME, ToolHandlerKind::WebFetch);
     }
 
     if config

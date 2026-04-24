@@ -7,6 +7,13 @@
 //! See docs/spec/design-principles.md — the LLM makes the judgment call,
 //! deterministic code handles the control flow.
 
+#[derive(Default)]
+struct StreamToolCallAcc {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
 use crate::client_common::{Prompt, ResponseStream};
 use codex_api::ResponseEvent;
 use codex_protocol::models::{ContentItem, ResponseItem};
@@ -44,6 +51,7 @@ const LIGHT_CODER_TOOL_NAMES: &[&str] = &[
     "view_image",
     "update_plan",
     "local_web_search",
+    "web_fetch",
     "request_permissions",
     "exec_command",
     "write_stdin",
@@ -152,7 +160,7 @@ fn build_tool_hint(tool_names: &[&str]) -> String {
                 "- `shell`: Run any shell command. Use this for `ls`, `cat`, `rg`, `grep`, `find`, `mkdir`, `rm`, `cd`, `pwd`, build/test commands, package installs, writing files via heredoc — anything you would type at a terminal.\n  REQUIRED ARG SHAPE: `command` MUST be a JSON array of strings, ALWAYS prefixed with `[\"bash\", \"-lc\", \"<your command line>\"]`.\n  Correct example: `{\"command\": [\"bash\", \"-lc\", \"ls -la\"]}`.\n  WRONG: `{\"command\": \"ls -la\"}` (must be an array).\n  WRONG: `{\"command\": [\"bash\", \"-lc\", \"[bash, -lc, ls]\"]}` (do NOT nest the bash invocation; the third element is your literal shell command)."
             }
             "apply_patch" => {
-                "- `apply_patch`: Create, modify, or delete files via a structured patch. Prefer this over `shell echo > file` for writing files.\n  REQUIRED ARG SHAPE: `input` is a single string in this exact format:\n  ```\n  *** Begin Patch\n  *** Add File: <relative_path>\n  +<line 1>\n  +<line 2>\n  *** End Patch\n  ```\n  Use `*** Update File: <path>` for edits (with `@@` hunk markers), `*** Delete File: <path>` for deletes. Do NOT use unified-diff (`--- a/file`, `+++ b/file`) format — that will be rejected."
+                "- `apply_patch`: Create, modify, or delete files via a structured patch. Prefer this over `shell echo > file` for writing files.\n\n  TWO FORMATS ACCEPTED — pick whichever is most natural:\n\n  FORMAT A: standard unified diff (the format `git diff` produces). This works as-is — file headers `--- a/path` / `+++ b/path` and hunk headers `@@ -L,N +L,N @@` are fine. Example:\n  ```\n  --- a/handler.py\n  +++ b/handler.py\n  @@ -17,7 +17,7 @@\n   def lambda_handler(event, context):\n  -    url = \"https://api.handle.me/resolve/{handle}\"\n  +    url = \"https://api.handle.me/handles/{handle}\"\n       return requests.get(url)\n  ```\n  `/dev/null` for one side means create or delete: `--- /dev/null` + `+++ b/new.py` adds a new file; `--- a/old.py` + `+++ /dev/null` deletes one.\n\n  FORMAT B: Codex native format. Use this when you want explicit anchor-by-context matching:\n  ```\n  *** Begin Patch\n  *** Update File: handler.py\n  @@ def lambda_handler(event, context):\n  -    url = \"https://api.handle.me/resolve/{handle}\"\n  +    url = \"https://api.handle.me/handles/{handle}\"\n  *** End Patch\n  ```\n  Use `*** Add File: <path>` for new files (every body line prefixed `+`), `*** Update File: <path>` for edits, `*** Delete File: <path>` for deletes.\n\n  PREFIX RULE (both formats) — every non-empty line in a hunk body MUST start with EXACTLY ONE of:\n    `+` ... a line you are ADDING\n    `-` ... a line you are REMOVING (Update only)\n    ` ` (a single space) ... a line that is UNCHANGED, included only as context to anchor the change (Update only)\n  Bare code lines without one of these prefixes are INVALID."
             }
             "list_dir" => {
                 "- `list_dir`: List directory contents (safer alternative to `shell ls`). Args: `{\"dir_path\": \"/abs/path\"}`. Path must be absolute."
@@ -164,7 +172,10 @@ fn build_tool_hint(tool_names: &[&str]) -> String {
                 "- `update_plan`: Track a multi-step task plan. Args: `{\"plan\": [{\"status\": \"in_progress\", \"step\": \"...\"}]}`."
             }
             "local_web_search" => {
-                "- `local_web_search`: Search the web via Brave; returns titles, URLs, and short descriptions. Args: `{\"query\": \"<search terms>\", \"count\": 10}` (count optional, 1-20)."
+                "- `local_web_search`: Search the web via Brave; returns titles, URLs, and short descriptions. Args: `{\"query\": \"<search terms>\", \"count\": 10}` (count optional, 1-20). Pair this with `web_fetch` to read a specific result."
+            }
+            "web_fetch" => {
+                "- `web_fetch`: Fetch a single http(s) URL and return the page body as text. Use this BEFORE writing code against an unfamiliar API or library — read the docs page rather than guessing the endpoint shape. Args: `{\"url\": \"https://...\"}`. Body is capped at 512KB; binary responses return a placeholder."
             }
             "request_permissions" => {
                 "- `request_permissions`: Ask for sandbox escalation when a command would otherwise be blocked (network access for `npm install`/`pip install`/`apt`, writing to a path outside cwd, etc.). Call this BEFORE the command that would fail, with a short justification."
@@ -228,13 +239,27 @@ async fn get_routing_state() -> &'static Option<RoutingState> {
             let config = RoutingConfig::from_project_config(&project_config);
             let pool = Arc::new(OllamaClientPool::new());
 
-            // Check if the classifier endpoint is reachable via /api/version
-            // (fast HTTP GET — doesn't require loading a model into GPU memory,
-            // unlike a chat request which can take 30s on cold start)
-            let version_url = format!(
-                "{}/api/version",
-                config.classifier.base_url.trim_end_matches('/')
-            );
+            // Check if the classifier endpoint is reachable via a fast HTTP
+            // GET that doesn't require loading a model into GPU memory
+            // (a chat request would take 30s on cold start). The probe path
+            // depends on flavor: Ollama exposes `/api/version` (returns
+            // `{"version": "0.x.y"}`); OpenAI-compat servers expose
+            // `/v1/models` (returns the loaded model list). LM Studio,
+            // llama.cpp, and vLLM all support `/v1/models`.
+            let version_url = match config.classifier.flavor {
+                codex_routing::config::ClientFlavor::Ollama => format!(
+                    "{}/api/version",
+                    config.classifier.base_url.trim_end_matches('/')
+                ),
+                codex_routing::config::ClientFlavor::OpenAICompat => {
+                    let base = config
+                        .classifier
+                        .base_url
+                        .trim_end_matches('/')
+                        .trim_end_matches("/v1");
+                    format!("{base}/v1/models")
+                }
+            };
             let initial_reachable = pool
                 .client()
                 .get(&version_url)
@@ -414,19 +439,6 @@ fn chain_name_for_route(route: &RouteTarget) -> &'static str {
     }
 }
 
-/// In local_only mode, remap cloud classifier routes onto their local
-/// equivalents. The local Light Coder absorbs every coding-shaped cloud
-/// tier; the local Light Reasoner absorbs every reasoning-shaped one.
-fn remap_for_local_only(route: RouteTarget) -> RouteTarget {
-    match route {
-        RouteTarget::CloudFast | RouteTarget::CloudMini | RouteTarget::CloudCoder => {
-            RouteTarget::LightCoder
-        }
-        RouteTarget::CloudReasoner => RouteTarget::LightReasoner,
-        local @ (RouteTarget::LightReasoner | RouteTarget::LightCoder) => local,
-    }
-}
-
 /// Returns true if local_only mode is requested, even when no RoutingState
 /// has been initialized (e.g., classifier endpoint unreachable at startup).
 /// Reads from the env var only — config.toml requires RoutingState to load.
@@ -551,8 +563,18 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
     // extract → merge → render on local Ollama. No proxy needed.
     if is_compaction_request(prompt) {
         if let Some(state) = get_routing_state().await.as_ref() {
-            if state.config.compactor.enabled {
-                info!("Compaction request detected — running full pipeline locally");
+            // In local_only mode the Coder absorbs compaction; in cloud mode
+            // the dedicated `compactor` endpoint is used.
+            let endpoint = if state.config.local_only {
+                &state.config.light_coder
+            } else {
+                &state.config.compactor
+            };
+            if endpoint.enabled {
+                info!(
+                    model = %endpoint.model,
+                    "Compaction request detected — running full pipeline locally"
+                );
 
                 // Phase 3: feed the compaction pipeline through the same
                 // role-aware trimmer used for per-request routing. The
@@ -564,10 +586,15 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
                     items: &prompt.input,
                     system_prompt: &prompt.base_instructions.text,
                     user_instructions: project_instructions.as_deref(),
+                    // Compaction summarizes history, so pinning fresh file
+                    // content doesn't help the compactor and would inflate
+                    // the input. Skip the file-state injection here.
+                    current_files: None,
+                    flavor: endpoint.flavor,
                 };
                 let trimmed = codex_routing::trim::trim_for_local(
                     &trim_input,
-                    state.config.compactor.num_ctx,
+                    endpoint.num_ctx,
                 );
                 info!(
                     trim_summary = %trimmed.summary.to_log_line(),
@@ -595,7 +622,7 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
                     &items,
                     &current_request,
                     &state.pool,
-                    &state.config.compactor,
+                    endpoint,
                     &compaction_config,
                 )
                 .await
@@ -605,7 +632,7 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
                         // Return the compacted summary as a text response
                         let response = codex_routing::local_dispatch::OllamaTextResponse {
                             content: summary,
-                            model: state.config.compactor.model.clone(),
+                            model: endpoint.model.clone(),
                             input_tokens: 0, // Pipeline doesn't track total
                             output_tokens: 0,
                         };
@@ -636,64 +663,76 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
         return cloud_fallback_or_local_error(state, "request had no user message text");
     }
 
-    // Extract tool names (just names, not full schemas)
-    let tool_names: Vec<&str> = prompt.tools.iter().map(|t| t.name()).collect();
-
-    // Count recent tool calls from conversation history
-    let (tool_call_count, turn_count) = count_recent_activity(prompt);
-
-    // G8: Check classifier cache — skip the 3-4s LLM call if confident
-    let cached_classification = state
-        .classify_cache
-        .lock()
-        .ok()
-        .and_then(|cache| cache.try_cached());
-
-    if let Some(ref cached) = cached_classification {
-        info!(
-            route = ?cached.route,
-            reason = %cached.reason,
-            "Using cached classification (skipping classifier LLM)"
-        );
-    }
-
-    // Use cached classification if available, otherwise call the classifier LLM
-    let classification = if let Some(cached) = cached_classification {
-        cached
+    // In local_only mode the classifier is a no-op: there's no cloud tier to
+    // pick, and the Coder absorbs every request (reasoning-shaped or not).
+    // Skip the LLM call, the cache, and the remap entirely.
+    let classification = if state.config.local_only {
+        info!("local_only: bypassing classifier — routing to LightCoder");
+        codex_routing::classifier::ClassifyResult {
+            route: RouteTarget::LightCoder,
+            tools_potential: true,
+            reason: "local_only: classifier bypassed".to_string(),
+        }
     } else {
-        let routing_profile = state
-            .feedback
+        // Extract tool names (just names, not full schemas)
+        let tool_names: Vec<&str> = prompt.tools.iter().map(|t| t.name()).collect();
+
+        // Count recent tool calls from conversation history
+        let (tool_call_count, turn_count) = count_recent_activity(prompt);
+
+        // G8: Check classifier cache — skip the 3-4s LLM call if confident
+        let cached_classification = state
+            .classify_cache
             .lock()
-            .map(|f| f.profile_context())
-            .unwrap_or_default();
-        let codebase_ctx = state.codebase_context.classifier_context();
+            .ok()
+            .and_then(|cache| cache.try_cached());
 
-        // G14: Add budget pressure to classifier context
-        let budget_ctx = state.budget.pressure_context();
-        let full_context = if budget_ctx.is_empty() {
-            codebase_ctx.clone()
-        } else {
-            format!("{codebase_ctx}\n{budget_ctx}")
-        };
-
-        let result = codex_routing::classifier::classify_request_with_context(
-            &prompt_text,
-            &tool_names,
-            tool_call_count,
-            turn_count,
-            &state.config,
-            &state.pool,
-            &routing_profile,
-            &full_context,
-        )
-        .await;
-
-        // Record in cache for future requests
-        if let Ok(mut cache) = state.classify_cache.lock() {
-            cache.record(&result);
+        if let Some(ref cached) = cached_classification {
+            info!(
+                route = ?cached.route,
+                reason = %cached.reason,
+                "Using cached classification (skipping classifier LLM)"
+            );
         }
 
-        result
+        // Use cached classification if available, otherwise call the classifier LLM
+        if let Some(cached) = cached_classification {
+            cached
+        } else {
+            let routing_profile = state
+                .feedback
+                .lock()
+                .map(|f| f.profile_context())
+                .unwrap_or_default();
+            let codebase_ctx = state.codebase_context.classifier_context();
+
+            // G14: Add budget pressure to classifier context
+            let budget_ctx = state.budget.pressure_context();
+            let full_context = if budget_ctx.is_empty() {
+                codebase_ctx.clone()
+            } else {
+                format!("{codebase_ctx}\n{budget_ctx}")
+            };
+
+            let result = codex_routing::classifier::classify_request_with_context(
+                &prompt_text,
+                &tool_names,
+                tool_call_count,
+                turn_count,
+                &state.config,
+                &state.pool,
+                &routing_profile,
+                &full_context,
+            )
+            .await;
+
+            // Record in cache for future requests
+            if let Ok(mut cache) = state.classify_cache.lock() {
+                cache.record(&result);
+            }
+
+            result
+        }
     };
 
     // G14: Hard-block primary if budget is critical (deterministic, not LLM)
@@ -707,20 +746,6 @@ pub(crate) async fn route_request(prompt: &Prompt) -> RouteResult {
         } else {
             classification.route
         };
-
-    // local_only: collapse cloud-tier classifications onto their local
-    // equivalents so the Light Coder/Reasoner serves every request.
-    if state.config.local_only {
-        let remapped = remap_for_local_only(route);
-        if remapped != route {
-            info!(
-                original = ?route,
-                remapped = ?remapped,
-                "local_only: remapping cloud route to local equivalent"
-            );
-            route = remapped;
-        }
-    }
 
     // Conversation-state override: if there are recent tool calls in the
     // history but the classifier picked LightReasoner (a text-only route),
@@ -990,11 +1015,20 @@ async fn try_local_model(
     // also still preserved as a user message via the trim's user-message rule.
     let project_instructions = extract_project_instructions(prompt);
 
+    // Re-read every file the active turn has edited so the trimmer can pin
+    // fresh content into the prelude. Without this the model works from
+    // its memory of the pre-patch state and writes patches with stale `-`
+    // lines — the same failure mode that caused multi-turn patch loops in
+    // early local-model sessions (see docs/spec/local-coder-massaging.md).
+    let current_files = load_active_turn_files(&prompt.input);
+
     // Trim the transcript with role-aware semantic compression.
     let trim_input = codex_routing::trim::TrimInput {
         items: &prompt.input,
         system_prompt: &prompt.base_instructions.text,
         user_instructions: project_instructions.as_deref(),
+        current_files: current_files.as_ref(),
+        flavor: endpoint.flavor,
     };
     let trimmed = codex_routing::trim::trim_for_local(&trim_input, endpoint.num_ctx);
     info!(
@@ -1061,64 +1095,199 @@ async fn try_local_model(
         let hint = build_tool_hint(&tool_names);
         let system = Some(format!("{trimmed_system}\n\n{hint}"));
 
+        let dropped_tool_names: Vec<&str> = match endpoint.tool_subset {
+            codex_routing::config::ToolSubset::Focused => LIGHT_CODER_TOOL_NAMES
+                .iter()
+                .copied()
+                .filter(|name| !tool_names.contains(name))
+                .collect(),
+            codex_routing::config::ToolSubset::Full => Vec::new(),
+        };
         info!(
             tool_count = ollama_tools.len(),
             available_in_prompt = prompt.tools.len(),
             subset = ?endpoint.tool_subset,
+            tools_passed = ?tool_names,
+            tools_dropped = ?dropped_tool_names,
             "Passing tool set to local coder"
         );
 
         // Loop here so we can re-call the model up to MAX_BAIL_RETRIES times
         // when the completion verifier flags a "bail" — see the body of the
-        // loop for details.
-        const MAX_BAIL_RETRIES: usize = 1;
+        // loop for details. Set to 3 so a model that's making genuine
+        // progress (e.g. ran a probe but hasn't applied the result yet)
+        // gets enough nudges to land the change before we give up.
+        const MAX_BAIL_RETRIES: usize = 3;
         let mut effective_messages = messages.clone();
         let mut continuation_count = 0usize;
         let last_user_message = extract_last_message(prompt);
 
         loop {
-            let result = state
+            // Streaming coder call with in-flight rumination detection.
+            // See rumination_detector.rs for the heuristic; the watcher
+            // here aborts the HTTP connection (by dropping the receiver)
+            // when the detector flags a loop, then re-prompts with a
+            // guard directive so we don't burn 10 min of reasoning on a
+            // model that's stuck self-interrupting.
+            let Some(mut stream_rx) = state
                 .pool
-                .chat_with_tools(
-                    &endpoint.base_url,
-                    &endpoint.model,
+                .chat_with_tools_stream(
+                    endpoint,
                     effective_messages.clone(),
                     system.as_deref(),
-                    endpoint.temperature,
-                    endpoint.num_ctx,
-                    None,
-                    endpoint.timeout_seconds,
                     Some(ollama_tools.clone()),
-                    endpoint.think,
                 )
-                .await;
-
-            let Some(body) = result else {
-                warn!("Local coder with tools failed");
+                .await
+            else {
+                warn!("Local coder stream failed to start");
                 return Err(FailureType::ModelUnavailable);
             };
 
-            let message = body.get("message").cloned().unwrap_or_default();
-            let content = message
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .to_string();
-            let raw_tool_calls = message
-                .get("tool_calls")
-                .and_then(|tc| tc.as_array())
-                .cloned()
-                .unwrap_or_default();
+            let detector = codex_routing::rumination_detector::RuminationDetector
+                ::from_endpoint_max_tokens(endpoint.max_tokens);
+
+            let mut content = String::new();
+            let mut reasoning = String::new();
+            let mut tool_call_acc: std::collections::BTreeMap<usize, StreamToolCallAcc> =
+                std::collections::BTreeMap::new();
+            let mut input_tokens = 0u64;
+            let mut output_tokens = 0u64;
+            let mut reasoning_tokens_seen = 0u64;
+            // Re-run the rumination regex at most every N bytes of new
+            // reasoning so a long stream doesn't quadratic-scan itself.
+            const RUMINATION_CHECK_STRIDE: usize = 500;
+            let mut next_check_at = RUMINATION_CHECK_STRIDE;
+
+            let mut rumination_trigger: Option<(usize, usize)> = None;
+            let mut stream_ended_cleanly = false;
+
+            while let Some(chunk) = stream_rx.recv().await {
+                match chunk {
+                    codex_routing::ollama::StreamChunk::Delta(text) => {
+                        content.push_str(&text);
+                    }
+                    codex_routing::ollama::StreamChunk::ReasoningDelta(text) => {
+                        reasoning.push_str(&text);
+                        if reasoning.len() >= next_check_at {
+                            next_check_at = reasoning.len() + RUMINATION_CHECK_STRIDE;
+                            // Prefer the server's reported reasoning-token
+                            // count when the usage chunk has already landed;
+                            // otherwise estimate from char count. Most SSE
+                            // servers only emit usage in the final chunk,
+                            // so the estimate is what actually fires the
+                            // budget gate mid-stream.
+                            let tokens = if reasoning_tokens_seen > 0 {
+                                reasoning_tokens_seen as usize
+                            } else {
+                                codex_routing::rumination_detector::estimate_reasoning_tokens(
+                                    &reasoning,
+                                )
+                            };
+                            let marker_count =
+                                codex_routing::rumination_detector::count_rumination_markers(
+                                    &reasoning,
+                                );
+                            let budget_gate = detector.budget_gate();
+                            let gated = tokens >= budget_gate;
+                            info!(
+                                reasoning_chars = reasoning.len(),
+                                reasoning_tokens = tokens,
+                                budget_gate,
+                                marker_count,
+                                threshold = detector.threshold(),
+                                gated,
+                                "Rumination watch"
+                            );
+                            if gated && marker_count >= detector.threshold() {
+                                rumination_trigger = Some((marker_count, tokens));
+                                break;
+                            }
+                        }
+                    }
+                    codex_routing::ollama::StreamChunk::ToolCallDelta {
+                        index, id, name, arguments_delta,
+                    } => {
+                        let acc = tool_call_acc.entry(index).or_default();
+                        if let Some(v) = id { acc.id = Some(v); }
+                        if let Some(v) = name { acc.name = Some(v); }
+                        acc.arguments.push_str(&arguments_delta);
+                    }
+                    codex_routing::ollama::StreamChunk::Done {
+                        input_tokens: it,
+                        output_tokens: ot,
+                        reasoning_tokens: rt,
+                    } => {
+                        input_tokens = it;
+                        output_tokens = ot;
+                        reasoning_tokens_seen = rt;
+                        stream_ended_cleanly = true;
+                        break;
+                    }
+                }
+            }
+
+            // Dropping stream_rx here (end of scope or explicit) closes the
+            // TCP connection when the stream task next tries to send,
+            // which signals LM Studio / Ollama to stop generating.
+            drop(stream_rx);
+
+            if let Some((hits, rumination_tokens)) = rumination_trigger {
+                info!(
+                    hits,
+                    reasoning_tokens = rumination_tokens,
+                    reasoning_len = reasoning.len(),
+                    continuation_count,
+                    "Rumination guard aborted local coder; re-prompting"
+                );
+                if continuation_count >= MAX_BAIL_RETRIES {
+                    warn!("Rumination guard hit retry cap; returning last partial response");
+                    // Fall through to assemble whatever we got.
+                } else {
+                    let guard = codex_routing::rumination_detector::continuation_prompt(
+                        hits,
+                        rumination_tokens,
+                    );
+                    effective_messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": guard,
+                    }));
+                    continuation_count += 1;
+                    continue;
+                }
+            }
+
+            if !stream_ended_cleanly && rumination_trigger.is_none() {
+                warn!("Local coder stream closed without Done; treating as unavailable");
+                return Err(FailureType::ModelUnavailable);
+            }
+
+            if !reasoning.is_empty() {
+                tracing::debug!(
+                    reasoning_len = reasoning.len(),
+                    reasoning_tokens = reasoning_tokens_seen,
+                    reasoning = %reasoning,
+                    "Local coder reasoning channel"
+                );
+            }
+
+            // Assemble tool calls from the accumulator in Ollama wire shape.
+            let raw_tool_calls: Vec<serde_json::Value> = tool_call_acc
+                .into_values()
+                .map(|acc| {
+                    serde_json::json!({
+                        "function": {
+                            "name": acc.name.unwrap_or_default(),
+                            "arguments": acc.arguments,
+                        }
+                    })
+                })
+                .collect();
             let native_tool_calls = translate_native_tool_calls(raw_tool_calls);
-            let input_tokens = body
-                .get("prompt_eval_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let output_tokens = body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
 
             info!(
                 content_len = content.len(),
                 native_tool_calls = native_tool_calls.len(),
+                reasoning_tokens = reasoning_tokens_seen,
                 continuation_count,
                 "Local coder response received"
             );
@@ -1135,10 +1304,19 @@ async fn try_local_model(
                 && continuation_count < MAX_BAIL_RETRIES
                 && !last_user_message.trim().is_empty()
             {
+                // In local_only mode the classifier endpoint is offline by
+                // design — route the verifier through the Coder so the
+                // bail-detector still works. In cloud mode keep using the
+                // small classifier (fast and warm).
+                let verifier_endpoint = if state.config.local_only {
+                    &state.config.light_coder
+                } else {
+                    &state.config.classifier
+                };
                 let verdict = codex_routing::completion_verifier::verify_completion(
                     &last_user_message,
                     &content,
-                    &state.config.classifier,
+                    verifier_endpoint,
                     &state.pool,
                 )
                 .await;
@@ -1183,16 +1361,7 @@ async fn try_local_model(
     // route is text-only by design.
     let stream_rx = state
         .pool
-        .chat_stream(
-            &endpoint.base_url,
-            &endpoint.model,
-            messages,
-            Some(trimmed_system.as_str()),
-            endpoint.temperature,
-            endpoint.num_ctx,
-            endpoint.timeout_seconds,
-            endpoint.think,
-        )
+        .chat_stream(endpoint, messages, Some(trimmed_system.as_str()))
         .await;
 
     let Some(mut ollama_rx) = stream_rx else {
@@ -1233,9 +1402,15 @@ async fn try_local_model(
                         .send(Ok(ResponseEvent::OutputTextDelta(text)))
                         .await;
                 }
+                codex_routing::ollama::StreamChunk::ReasoningDelta(_)
+                | codex_routing::ollama::StreamChunk::ToolCallDelta { .. } => {
+                    // Reasoner path is text-only — ignore reasoning and
+                    // tool-call deltas if the server happens to emit any.
+                }
                 codex_routing::ollama::StreamChunk::Done {
                     input_tokens: it,
                     output_tokens: ot,
+                    ..
                 } => {
                     input_tokens = it;
                     output_tokens = ot;
@@ -1761,6 +1936,41 @@ fn conversation_has_recent_tool_calls(prompt: &Prompt) -> bool {
                 | ResponseItem::CustomToolCallOutput { .. }
         )
     })
+}
+
+/// Read every file the active turn has edited (via `apply_patch` Add/Update)
+/// and return a `path -> current_content` map. Missing files, unreadable
+/// files, and non-UTF-8 files are silently skipped. Returns `None` when the
+/// active turn hasn't modified any files, so the trimmer's file-state block
+/// is omitted entirely in the common case.
+///
+/// Paths are resolved against the process `cwd` — matching how every other
+/// local-coder tool handler in this crate resolves paths. The trimmer has
+/// no IO of its own by design; this function is the only place the routing
+/// layer reads from disk on behalf of the prelude builder.
+fn load_active_turn_files(
+    items: &[codex_protocol::models::ResponseItem],
+) -> Option<std::collections::HashMap<String, String>> {
+    let paths = codex_routing::trim::files_modified_in_active_turn(items);
+    if paths.is_empty() {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok();
+    let mut out = std::collections::HashMap::with_capacity(paths.len());
+    for path in paths {
+        let candidate = match &cwd {
+            Some(base) => base.join(&path),
+            None => std::path::PathBuf::from(&path),
+        };
+        if let Ok(content) = std::fs::read_to_string(&candidate) {
+            out.insert(path, content);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// Extract the AGENTS.md / CLAUDE.md content from the conversation, if any.

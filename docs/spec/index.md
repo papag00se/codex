@@ -16,6 +16,7 @@
 - [Routing Architecture](routing-architecture.md) — Unified routing model, scoring, fallback, budget/privacy-aware routing
 - [Routing Logic Reference](routing-logic-reference.md) — **Preserved from coding-agent-router:** every heuristic, threshold, fallback path, config knob
 - [Compaction Reference](compaction-reference.md) — **Preserved from coding-agent-router:** full compaction pipeline algorithm
+- [Local Coder Massaging](local-coder-massaging.md) — Every orchestration-layer intervention that props up small local coder models: problem, fix, code pointer, log signal
 - [Provider Abstraction](provider-abstraction.md) — Provider types, capability schema, adapter interface
 - [State Model](state-model.md) — SQLite schema, task state machine, entity relationships
 - [Event Model](event-model.md) — 20+ event types with producers, consumers, payloads, idempotency

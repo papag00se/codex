@@ -231,16 +231,24 @@ pub async fn route_task(
         "Asking router model to select route"
     );
 
+    let router_ep = crate::config::OllamaEndpoint {
+        base_url: config.router.base_url.clone(),
+        model: config.router.model.clone(),
+        num_ctx: config.router.num_ctx,
+        temperature: config.router.temperature,
+        timeout_seconds: config.router.timeout_seconds,
+        enabled: true,
+        think: false,
+        tool_subset: crate::config::ToolSubset::Focused,
+        flavor: crate::config::ClientFlavor::Ollama,
+        max_tokens: None,
+    };
     let response = ollama
         .chat(
-            &config.router.base_url,
-            &config.router.model,
+            &router_ep,
             vec![serde_json::json!({"role": "user", "content": digest_str})],
             Some(ROUTER_SYSTEM),
-            config.router.temperature,
-            config.router.num_ctx,
             Some("json"),
-            config.router.timeout_seconds,
         )
         .await;
 

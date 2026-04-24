@@ -38,26 +38,63 @@ impl ToolSubset {
     }
 }
 
-/// A single Ollama endpoint + model.
+/// Wire-format flavor for a local model endpoint. Both the dispatcher and
+/// the response parser branch on this; callers always see a uniform
+/// Ollama-shaped response regardless of which flavor was used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ClientFlavor {
+    /// Ollama's native `/api/chat` endpoint with `options: { num_ctx, ... }`,
+    /// `think: bool`, `format: "json"`, NDJSON streaming. Default for
+    /// backwards compatibility with existing configs.
+    #[default]
+    Ollama,
+    /// OpenAI-compatible `/v1/chat/completions` endpoint. Works with
+    /// LM Studio, llama.cpp's `--api-server`, vLLM, and Ollama itself
+    /// (which also exposes a `/v1` shim). Translates payloads to the
+    /// OpenAI shape (top-level `temperature`/`max_tokens`,
+    /// `response_format: {type: "json_object"}`, no `think` field) and
+    /// translates responses back to the Ollama shape so callers don't
+    /// need to know which flavor was used.
+    OpenAICompat,
+}
+
+/// A single local-model endpoint + model. Despite the name, this is used
+/// for any local-model wire flavor — see [`ClientFlavor`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OllamaEndpoint {
     pub base_url: String,
     pub model: String,
     pub num_ctx: usize,
     pub temperature: f64,
+    /// Per-request wall-clock timeout. `0` disables the timeout entirely
+    /// (reasoning runs are legitimately unbounded). Normalized from config:
+    /// a missing key defaults to 300s; an explicit `0` means "wait forever".
     pub timeout_seconds: u64,
     pub enabled: bool,
     /// Whether to enable Ollama's reasoning/`think` mode. Derived from the
     /// model role's `reasoning` config (`"on"`/`"off"`); defaults to `false`.
     /// Models that support thinking (qwen3.5, deepseek-r1, …) produce better
     /// multi-step plans when this is on, at the cost of extra latency from
-    /// the thinking tokens.
+    /// the thinking tokens. Ignored for [`ClientFlavor::OpenAICompat`].
     #[serde(default)]
     pub think: bool,
     /// How many tools to expose. See [`ToolSubset`]. Derived from the role's
     /// `tool_subset` config field; defaults to `Focused`.
     #[serde(default)]
     pub tool_subset: ToolSubset,
+    /// Wire-format flavor — Ollama's `/api/chat` (default) or OpenAI-style
+    /// `/v1/chat/completions`. Set via the project config's `provider`
+    /// field: `"ollama"` → `Ollama`, `"openai-compat"` / `"openai_compat"`
+    /// / `"lmstudio"` → `OpenAICompat`.
+    #[serde(default)]
+    pub flavor: ClientFlavor,
+    /// Hard ceiling on output tokens per response. `None` = no cap, let
+    /// the server decide. Maps to `max_tokens` for OpenAI-compat and
+    /// `options.num_predict` for Ollama. Normalized from config: a
+    /// `max_tokens = 0` in the TOML file is treated the same as omitting
+    /// the key (unlimited), which is the ergonomic convention.
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
 }
 
 impl OllamaEndpoint {
@@ -71,6 +108,8 @@ impl OllamaEndpoint {
             enabled: true,
             think: false,
             tool_subset: ToolSubset::Focused,
+            flavor: ClientFlavor::Ollama,
+            max_tokens: None,
         }
     }
 }
@@ -260,10 +299,19 @@ fn endpoint_from_role(role: &crate::project_config::ModelRole) -> Option<OllamaE
             reasoning,
             num_ctx,
             tool_subset,
+            max_tokens,
+            timeout_seconds,
         } => {
-            if provider != "ollama" {
-                return None; // Only Ollama endpoints can be used as local endpoints
-            }
+            let flavor = match provider.as_str() {
+                "ollama" => ClientFlavor::Ollama,
+                "openai-compat" | "openai_compat" | "lmstudio" | "lm-studio"
+                | "lm_studio" | "openai" => ClientFlavor::OpenAICompat,
+                _ => return None,
+            };
+            // Normalize 0 → None so `max_tokens = 0` reads as "unlimited"
+            // (the convention for "disabled") rather than actually clamping
+            // output to zero tokens.
+            let max_tokens = max_tokens.filter(|&n| n > 0);
             Some(OllamaEndpoint {
                 base_url: endpoint
                     .clone()
@@ -271,13 +319,15 @@ fn endpoint_from_role(role: &crate::project_config::ModelRole) -> Option<OllamaE
                 model: model.clone(),
                 num_ctx: num_ctx.unwrap_or(8192),
                 temperature: if reasoning == "off" { 0.0 } else { 0.1 },
-                timeout_seconds: 300,
+                timeout_seconds: timeout_seconds.unwrap_or(300),
                 enabled: true,
                 think: reasoning != "off",
                 tool_subset: tool_subset
                     .as_deref()
                     .map(ToolSubset::from_config_str)
                     .unwrap_or_default(),
+                flavor,
+                max_tokens,
             })
         }
         crate::project_config::ModelRole::Weighted { .. } => {

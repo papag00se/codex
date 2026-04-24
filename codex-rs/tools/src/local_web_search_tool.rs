@@ -28,6 +28,13 @@ pub fn create_local_web_search_tool() -> ToolSpec {
                     .to_string(),
             )),
         ),
+        (
+            "user_agent".to_string(),
+            JsonSchema::string(Some(
+                "Optional User-Agent header to send with the search request. If omitted, a current Brave-style desktop Chrome UA is used."
+                    .to_string(),
+            )),
+        ),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {

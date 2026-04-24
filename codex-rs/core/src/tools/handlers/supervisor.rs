@@ -340,14 +340,10 @@ impl CodexJudge {
         let response = self
             .ollama_pool
             .chat(
-                &ep.base_url,
-                &ep.model,
+                ep,
                 vec![serde_json::json!({"role": "user", "content": prompt})],
                 None,
-                ep.temperature,
-                ep.num_ctx,
                 None,
-                ep.timeout_seconds,
             )
             .await;
 

@@ -25,12 +25,14 @@ mod tests;
 use codex_protocol::models::ResponseItem;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
 pub use items::TrimItem;
+pub use state_extract::files_modified_in_active_turn;
 
 /// Input handed to the trimmer. Decoupled from the codex-core `Prompt` type so
 /// the routing crate stays independent of `codex-core`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TrimInput<'a> {
     /// Conversation items, oldest first, exactly as they appear in `Prompt::input`.
     pub items: &'a [ResponseItem],
@@ -39,6 +41,21 @@ pub struct TrimInput<'a> {
     /// Project-level user instructions (AGENTS.md / CLAUDE.md content), if any.
     /// These are pinned into the persistent context block.
     pub user_instructions: Option<&'a str>,
+    /// Fresh contents of files modified in the active turn, keyed by the
+    /// same normalized path that state_extract uses. Injected verbatim into
+    /// the prelude so small models can't work from a stale mental model of
+    /// a file they just edited. The caller (not the trim module itself) is
+    /// responsible for reading files — trim stays pure / no-IO. Use
+    /// [`files_modified_in_active_turn`] to figure out which paths to load.
+    pub current_files: Option<&'a HashMap<String, String>>,
+    /// Wire-format flavor for the model the trimmed transcript will be sent
+    /// to. Affects per-message rendering for tool calls / tool outputs:
+    /// Ollama is lenient about message shapes (we wrap tool outputs in
+    /// `<tool_result>` user messages); OpenAI-compat servers reject
+    /// anything that doesn't match the strict
+    /// `assistant{tool_calls}` → `tool{tool_call_id, content}` pairing.
+    /// Defaults to Ollama for backwards compatibility.
+    pub flavor: crate::config::ClientFlavor,
 }
 
 /// Result of trimming, ready to send to a local model via the Ollama chat API.
@@ -102,9 +119,14 @@ pub fn trim_for_local(input: &TrimInput, target_ctx: usize) -> TrimResult {
     let extracted = state_extract::extract(&parsed, active_turn);
     let compressed_older = rules::compress_older_turns(&parsed, active_turn);
 
-    let prelude = render::render_prelude(input.user_instructions, &extracted, active_turn);
+    let prelude = render::render_prelude(
+        input.user_instructions,
+        &extracted,
+        active_turn,
+        input.current_files,
+    );
     let (messages, older_turn_message_count) =
-        render::render_messages(&compressed_older, &parsed, active_turn);
+        render::render_messages(&compressed_older, &parsed, active_turn, input.flavor);
 
     let mut summary = TrimSummary {
         original_items: input.items.len(),

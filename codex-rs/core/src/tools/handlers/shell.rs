@@ -94,8 +94,10 @@ impl ShellHandler {
         turn_context: &TurnContext,
         thread_id: ThreadId,
     ) -> ExecParams {
+        let mut command = params.command.clone();
+        codex_routing::curl_ua::inject_curl_user_agent_argv(&mut command);
         ExecParams {
-            command: params.command.clone(),
+            command,
             cwd: turn_context.resolve_path(params.workdir.clone()),
             expiration: params.timeout_ms.into(),
             capture_policy: ExecCapturePolicy::ShellTool,
@@ -147,7 +149,8 @@ impl ShellCommandHandler {
     ) -> Result<ExecParams, FunctionCallError> {
         let shell = session.user_shell();
         let use_login_shell = Self::resolve_use_login_shell(params.login, allow_login_shell)?;
-        let command = Self::base_command(shell.as_ref(), &params.command, use_login_shell);
+        let augmented = codex_routing::curl_ua::inject_curl_user_agent_str(&params.command);
+        let command = Self::base_command(shell.as_ref(), &augmented, use_login_shell);
 
         Ok(ExecParams {
             command,

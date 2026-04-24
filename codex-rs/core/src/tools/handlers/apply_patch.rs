@@ -155,6 +155,25 @@ impl ToolHandler for ApplyPatchHandler {
 
         let patch_input = match payload {
             ToolPayload::Function { arguments } => {
+                // Special-case empty / `{}` arguments before generic parsing
+                // so we can give the model a directive error with the
+                // expected shape — small models routinely emit `{}` after
+                // bailing on a hard turn, and the default `missing field
+                // input` error doesn't tell them how to recover.
+                let trimmed = arguments.trim();
+                if trimmed.is_empty() || trimmed == "{}" {
+                    return Err(FunctionCallError::RespondToModel(
+                        concat!(
+                            "apply_patch was called with empty arguments. ",
+                            "It requires an `input` field containing the patch text. ",
+                            "Example: ",
+                            r#"{"input": "*** Begin Patch\n*** Update File: path/to/file.py\n@@\n-old line\n+new line\n*** End Patch\n"}"#,
+                            ". Either retry the call with the full patch as the `input` field, ",
+                            "or use a different tool if you don't actually need to modify a file."
+                        )
+                        .to_string(),
+                    ));
+                }
                 let args: ApplyPatchToolArgs = parse_arguments(&arguments)?;
                 args.input
             }

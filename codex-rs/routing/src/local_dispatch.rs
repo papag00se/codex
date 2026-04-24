@@ -67,18 +67,7 @@ pub async fn call_ollama_text(
     messages: Vec<JsonValue>,
     system: Option<&str>,
 ) -> Result<OllamaTextResponse, String> {
-    let response = pool
-        .chat(
-            &endpoint.base_url,
-            &endpoint.model,
-            messages,
-            system,
-            endpoint.temperature,
-            endpoint.num_ctx,
-            None,
-            endpoint.timeout_seconds,
-        )
-        .await;
+    let response = pool.chat(endpoint, messages, system, None).await;
 
     match response {
         Some(body) => {

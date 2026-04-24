@@ -18,6 +18,8 @@ fn empty_transcript_produces_only_system_prompt() {
             items: &[],
             system_prompt: "You are Codex.",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -33,6 +35,8 @@ fn user_instructions_appear_in_prelude() {
             items: &[user_msg("hello")],
             system_prompt: "SYS",
             user_instructions: Some("Don't use mocks."),
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -53,6 +57,8 @@ fn system_prompt_is_never_stubbed_or_truncated() {
             items: &[user_msg("hi")],
             system_prompt: &long,
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -67,6 +73,8 @@ fn active_turn_user_message_kept_verbatim() {
             items: &[user_msg(prompt)],
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -94,6 +102,8 @@ fn tool_calls_and_outputs_in_active_turn_are_preserved() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -134,6 +144,8 @@ fn old_read_then_patch_drops_old_read_output() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -172,6 +184,8 @@ fn duplicate_grep_supersedes_older_output() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -209,6 +223,8 @@ fn shell_output_with_nonzero_exit_recognized_as_failure() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -243,6 +259,8 @@ fn failed_shell_output_kept_even_in_old_turn() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -275,6 +293,8 @@ fn repetition_detected_after_three_identical_calls() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -299,6 +319,44 @@ fn repetition_detected_after_three_identical_calls() {
 }
 
 #[test]
+fn repetition_detected_with_short_assistant_text_interleaved() {
+    // Regression: local models often emit 1-2 chars of assistant content
+    // alongside each tool_call (a single space, ".", or similar filler).
+    // Earlier the detector broke the streak on any AssistantText, so it
+    // never crossed threshold and the model looped indefinitely on the
+    // same `cat <file>` / same `curl` call. The detector must now treat
+    // AssistantText as transparent.
+    let curl_args = r#"{"command":["bash","-lc","cat /tmp/foo.py"]}"#;
+    let items = vec![
+        user_msg("look at foo.py"),
+        assistant_msg(" "),
+        function_call("c1", "shell", curl_args),
+        function_output("c1", "content", true),
+        assistant_msg("."),
+        function_call("c2", "shell", curl_args),
+        function_output("c2", "content", true),
+        assistant_msg(" "),
+        function_call("c3", "shell", curl_args),
+        function_output("c3", "content", true),
+    ];
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
+        },
+        16384,
+    );
+    assert!(
+        result.system.contains("[STOP — REPETITION DETECTED]"),
+        "should fire despite short assistant narration between calls:\n{}",
+        result.system
+    );
+}
+
+#[test]
 fn no_repetition_alert_after_only_two_identical_calls() {
     // Two calls is fine — could be a legitimate retry. Don't false-positive.
     let curl_args = r#"{"command":["bash","-lc","curl -s https://api.example.com/foo"]}"#;
@@ -314,6 +372,8 @@ fn no_repetition_alert_after_only_two_identical_calls() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -352,6 +412,8 @@ fn no_repetition_alert_when_calls_have_different_args() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -383,6 +445,8 @@ fn world_state_includes_stale_warning_for_old_modifications() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -422,6 +486,8 @@ fn apply_patch_failure_gets_recovery_hint() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -461,6 +527,8 @@ fn shell_regex_failure_gets_glob_hint() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -493,6 +561,8 @@ fn world_state_lists_modified_files() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -521,6 +591,8 @@ fn old_assistant_text_dropped_from_messages_but_actions_recorded() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -562,6 +634,8 @@ fn old_successful_shell_output_dropped_action_receipt_kept() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -607,6 +681,8 @@ fn old_grep_output_kept_with_match_cap() {
             items: &items,
             system_prompt: "SYS",
             user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
         },
         16384,
     );
@@ -644,6 +720,109 @@ fn turn_id_increments_only_on_user_messages() {
     assert_eq!(parsed.items[0].turn_id(), 0); // first user
     assert_eq!(parsed.items[1].turn_id(), 0); // assistant in turn 0
     assert_eq!(parsed.items[2].turn_id(), 1); // second user
+}
+
+#[test]
+fn current_file_state_block_injects_modified_file_contents() {
+    use std::collections::HashMap;
+    // Active turn contains an apply_patch that edits handler.py.
+    let patch = "*** Begin Patch\n*** Update File: handler.py\n@@\n-old\n+new\n*** End Patch\n";
+    let items = vec![
+        user_msg("please edit"),
+        function_call("c1", "apply_patch", &format!("{{\"input\":{}}}", serde_json::Value::String(patch.to_string()))),
+        function_output("c1", "Success", true),
+    ];
+    // Caller has re-read the file and passed the current disk content.
+    let mut current_files = HashMap::new();
+    current_files.insert(
+        "handler.py".to_string(),
+        "line1\nline2\nline3\n".to_string(),
+    );
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+            current_files: Some(&current_files),
+            flavor: super::super::config::ClientFlavor::Ollama,
+        },
+        16384,
+    );
+    assert!(
+        result.system.contains("[Current file state"),
+        "missing current-file block:\n{}",
+        result.system
+    );
+    assert!(
+        result.system.contains("--- Current content of handler.py"),
+        "missing file header:\n{}",
+        result.system
+    );
+    assert!(
+        result.system.contains("line1\nline2\nline3"),
+        "missing file content:\n{}",
+        result.system
+    );
+    assert!(result.system.contains("--- End of handler.py"));
+}
+
+#[test]
+fn current_file_state_block_omitted_when_no_files_modified() {
+    use std::collections::HashMap;
+    let current_files: HashMap<String, String> = HashMap::new();
+    let result = trim_for_local(
+        &TrimInput {
+            items: &[user_msg("hi")],
+            system_prompt: "SYS",
+            user_instructions: None,
+            current_files: Some(&current_files),
+            flavor: super::super::config::ClientFlavor::Ollama,
+        },
+        16384,
+    );
+    assert!(!result.system.contains("[Current file state"));
+}
+
+#[test]
+fn same_target_failure_repetition_detected_despite_different_args() {
+    // 3 consecutive apply_patch FAILURES on handler.py with different args
+    // (different `-` lines each time) should still fire the repetition
+    // alert. The exact-signature detector misses this because the
+    // signature hashes differ; the same-target-failure detector catches it.
+    let mk_patch = |marker: &str| -> String {
+        format!(
+            "*** Begin Patch\n*** Update File: handler.py\n@@\n-{marker}\n+replacement\n*** End Patch\n"
+        )
+    };
+    let items = vec![
+        user_msg("fix it"),
+        function_call("c1", "apply_patch", &format!("{{\"input\":{}}}", serde_json::Value::String(mk_patch("foo")))),
+        function_output("c1", "apply_patch verification failed: Failed to find expected lines", false),
+        function_call("c2", "apply_patch", &format!("{{\"input\":{}}}", serde_json::Value::String(mk_patch("bar")))),
+        function_output("c2", "apply_patch verification failed: Failed to find expected lines", false),
+        function_call("c3", "apply_patch", &format!("{{\"input\":{}}}", serde_json::Value::String(mk_patch("baz")))),
+        function_output("c3", "apply_patch verification failed: Failed to find expected lines", false),
+    ];
+    let result = trim_for_local(
+        &TrimInput {
+            items: &items,
+            system_prompt: "SYS",
+            user_instructions: None,
+            current_files: None,
+            flavor: super::super::config::ClientFlavor::Ollama,
+        },
+        16384,
+    );
+    assert!(
+        result.system.contains("[STOP — REPETITION DETECTED]"),
+        "expected repetition alert:\n{}",
+        result.system
+    );
+    assert!(
+        result.system.contains("consecutive failures on handler.py"),
+        "expected failure-streak summary:\n{}",
+        result.system
+    );
 }
 
 // --- helpers ------------------------------------------------------------
